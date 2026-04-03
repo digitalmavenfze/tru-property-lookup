@@ -1,19 +1,52 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function HomePage() {
   const [email, setEmail] = useState("admin@truproplookup.trucrm.io");
   const [password, setPassword] = useState("ChangeMe123!");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [user, setUser] = useState(null);
   const [error, setError] = useState("");
+
+  async function loadCurrentUser(token) {
+    try {
+      const res = await fetch("/api/me", {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        localStorage.removeItem("session_token");
+        setUser(null);
+        return;
+      }
+
+      setUser(data.user);
+    } catch {
+      setUser(null);
+    } finally {
+      setCheckingSession(false);
+    }
+  }
+
+  useEffect(() => {
+    const token = localStorage.getItem("session_token");
+    if (!token) {
+      setCheckingSession(false);
+      return;
+    }
+    loadCurrentUser(token);
+  }, []);
 
   async function handleLogin(e) {
     e.preventDefault();
     setLoading(true);
     setError("");
-    setResult(null);
 
     try {
       const res = await fetch("/api/login", {
@@ -30,7 +63,8 @@ export default function HomePage() {
         throw new Error(data.detail || "Login failed");
       }
 
-      setResult(data);
+      localStorage.setItem("session_token", data.session_token);
+      setUser(data.user);
     } catch (err) {
       setError(err.message || "Something went wrong");
     } finally {
@@ -38,18 +72,60 @@ export default function HomePage() {
     }
   }
 
+  function handleLogout() {
+    localStorage.removeItem("session_token");
+    setUser(null);
+  }
+
+  if (checkingSession) {
+    return (
+      <main style={{ maxWidth: 520, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
+        <h1 style={{ marginTop: 0 }}>Tru Property Lookup</h1>
+        <p>Checking session...</p>
+      </main>
+    );
+  }
+
+  if (user) {
+    return (
+      <main style={{ maxWidth: 720, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
+        <h1 style={{ marginTop: 0 }}>Tru Property Lookup</h1>
+        <p>Welcome to the dashboard.</p>
+
+        <div style={{ marginTop: 24, padding: 16, borderRadius: 12, background: "#ecfdf5" }}>
+          <div><strong>Name:</strong> {user.full_name}</div>
+          <div><strong>Email:</strong> {user.email}</div>
+          <div><strong>Role:</strong> {user.role}</div>
+          <div><strong>Tenant:</strong> {user.tenant}</div>
+        </div>
+
+        <div style={{ marginTop: 24, padding: 16, borderRadius: 12, background: "#f3f4f6" }}>
+          <strong>Next modules:</strong>
+          <div style={{ marginTop: 8 }}>1. Excel upload</div>
+          <div>2. File profiling</div>
+          <div>3. Header detection</div>
+          <div>4. Search screen</div>
+        </div>
+
+        <button
+          onClick={handleLogout}
+          style={{
+            marginTop: 24,
+            padding: 12,
+            borderRadius: 10,
+            border: "none",
+            cursor: "pointer",
+            fontWeight: 700
+          }}
+        >
+          Logout
+        </button>
+      </main>
+    );
+  }
+
   return (
-    <main
-      style={{
-        maxWidth: 520,
-        margin: "60px auto",
-        background: "#fff",
-        padding: 32,
-        borderRadius: 16,
-        boxShadow: "0 10px 30px rgba(0,0,0,0.08)",
-        fontFamily: "Arial, sans-serif"
-      }}
-    >
+    <main style={{ maxWidth: 520, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
       <h1 style={{ marginTop: 0 }}>Tru Property Lookup</h1>
       <p>Login to access the property search platform.</p>
 
@@ -60,13 +136,7 @@ export default function HomePage() {
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 10,
-              border: "1px solid #d1d5db",
-              boxSizing: "border-box"
-            }}
+            style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid #d1d5db", boxSizing: "border-box" }}
           />
         </div>
 
@@ -76,60 +146,22 @@ export default function HomePage() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 10,
-              border: "1px solid #d1d5db",
-              boxSizing: "border-box"
-            }}
+            style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid #d1d5db", boxSizing: "border-box" }}
           />
         </div>
 
         <button
           type="submit"
           disabled={loading}
-          style={{
-            padding: 12,
-            borderRadius: 10,
-            border: "none",
-            cursor: "pointer",
-            fontWeight: 700
-          }}
+          style={{ padding: 12, borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700 }}
         >
           {loading ? "Signing in..." : "Sign In"}
         </button>
       </form>
 
       {error ? (
-        <div
-          style={{
-            marginTop: 20,
-            padding: 12,
-            borderRadius: 10,
-            background: "#fee2e2",
-            color: "#991b1b"
-          }}
-        >
+        <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#fee2e2", color: "#991b1b" }}>
           {error}
-        </div>
-      ) : null}
-
-      {result ? (
-        <div
-          style={{
-            marginTop: 20,
-            padding: 16,
-            borderRadius: 10,
-            background: "#ecfdf5",
-            color: "#065f46"
-          }}
-        >
-          <div><strong>{result.message}</strong></div>
-          <div style={{ marginTop: 8 }}>Name: {result.user.full_name}</div>
-          <div>Email: {result.user.email}</div>
-          <div>Role: {result.user.role}</div>
-          <div>Tenant: {result.user.tenant}</div>
         </div>
       ) : null}
     </main>
