@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tru-property-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tru_property_lookup
+      POSTGRES_USER: tru_user
+      POSTGRES_PASSWORD: tru_password_change_me
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - tru_property_db_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./apps/backend
+    container_name: tru-property-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8050:8050"
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ./apps/frontend
+    container_name: tru-property-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3020:3020"
+    depends_on:
+      - backend
+
+volumes:
+  tru_property_db_data:
