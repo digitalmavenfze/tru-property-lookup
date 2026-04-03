@@ -197,11 +197,18 @@ def profile_upload(
 
     try:
         if file.filename.lower().endswith(".csv"):
-            df = pd.read_csv(pd.io.common.BytesIO(file_bytes))
+            df = pd.read_csv(
+                pd.io.common.BytesIO(file_bytes),
+                dtype=str,
+                keep_default_na=False
+            )
             file_type = "csv"
 
         elif file.filename.lower().endswith((".xlsx", ".xls")):
-            df = pd.read_excel(pd.io.common.BytesIO(file_bytes))
+            df = pd.read_excel(
+                pd.io.common.BytesIO(file_bytes),
+                dtype=str
+            ).fillna("")
             file_type = "excel"
 
         else:
