@@ -183,3 +183,40 @@ def upload_file(
         "size_bytes": os.path.getsize(file_path),
         "uploaded_by": user["email"]
     }
+
+import pandas as pd
+
+@app.post("/profile-upload")
+def profile_upload(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None)
+):
+    user = get_current_user_from_auth(authorization)
+
+    file_bytes = file.file.read()
+
+    try:
+        if file.filename.lower().endswith(".csv"):
+            df = pd.read_csv(pd.io.common.BytesIO(file_bytes))
+            file_type = "csv"
+
+        elif file.filename.lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(pd.io.common.BytesIO(file_bytes))
+            file_type = "excel"
+
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+
+    preview = df.head(5).fillna("").to_dict(orient="records")
+
+    return {
+        "file_type": file_type,
+        "columns": list(df.columns),
+        "row_count": int(df.shape[0]),
+        "column_count": int(df.shape[1]),
+        "preview": preview,
+        "uploaded_by": user["email"]
+    }
