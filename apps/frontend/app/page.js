@@ -9,6 +9,9 @@ export default function HomePage() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [user, setUser] = useState(null);
   const [error, setError] = useState("");
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
 
   async function loadCurrentUser(token) {
     try {
@@ -72,9 +75,55 @@ export default function HomePage() {
     }
   }
 
+  async function handleUpload(e) {
+    e.preventDefault();
+    setUploadResult(null);
+    setError("");
+
+    if (!selectedFile) {
+      setError("Please select a file first");
+      return;
+    }
+
+    const token = localStorage.getItem("session_token");
+    if (!token) {
+      setError("Session missing. Please login again.");
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        body: formData
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || "Upload failed");
+      }
+
+      setUploadResult(data);
+    } catch (err) {
+      setError(err.message || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   function handleLogout() {
     localStorage.removeItem("session_token");
     setUser(null);
+    setSelectedFile(null);
+    setUploadResult(null);
   }
 
   if (checkingSession) {
@@ -88,7 +137,7 @@ export default function HomePage() {
 
   if (user) {
     return (
-      <main style={{ maxWidth: 720, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
+      <main style={{ maxWidth: 820, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
         <h1 style={{ marginTop: 0 }}>Tru Property Lookup</h1>
         <p>Welcome to the dashboard.</p>
 
@@ -106,6 +155,46 @@ export default function HomePage() {
           <div>3. Header detection</div>
           <div>4. Search screen</div>
         </div>
+
+        <form onSubmit={handleUpload} style={{ marginTop: 24, padding: 16, borderRadius: 12, background: "#f9fafb", display: "grid", gap: 16 }}>
+          <div>
+            <strong>Upload Excel file</strong>
+          </div>
+
+          <input
+            type="file"
+            onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+          />
+
+          <button
+            type="submit"
+            disabled={uploading}
+            style={{
+              padding: 12,
+              borderRadius: 10,
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 700
+            }}
+          >
+            {uploading ? "Uploading..." : "Upload File"}
+          </button>
+        </form>
+
+        {uploadResult ? (
+          <div style={{ marginTop: 20, padding: 16, borderRadius: 10, background: "#eff6ff", color: "#1e3a8a" }}>
+            <div><strong>{uploadResult.message}</strong></div>
+            <div style={{ marginTop: 8 }}>Filename: {uploadResult.filename}</div>
+            <div>Size: {uploadResult.size_bytes} bytes</div>
+            <div>Uploaded by: {uploadResult.uploaded_by}</div>
+          </div>
+        ) : null}
+
+        {error ? (
+          <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#fee2e2", color: "#991b1b" }}>
+            {error}
+          </div>
+        ) : null}
 
         <button
           onClick={handleLogout}

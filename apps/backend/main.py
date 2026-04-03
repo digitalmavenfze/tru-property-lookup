@@ -166,7 +166,12 @@ UPLOAD_DIR = "/app/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")
-def upload_file(file: UploadFile = File(...)):
+def upload_file(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None)
+):
+    user = get_current_user_from_auth(authorization)
+
     file_path = os.path.join(UPLOAD_DIR, file.filename)
 
     with open(file_path, "wb") as f:
@@ -175,5 +180,6 @@ def upload_file(file: UploadFile = File(...)):
     return {
         "message": "File uploaded",
         "filename": file.filename,
-        "size_bytes": os.path.getsize(file_path)
+        "size_bytes": os.path.getsize(file_path),
+        "uploaded_by": user["email"]
     }
