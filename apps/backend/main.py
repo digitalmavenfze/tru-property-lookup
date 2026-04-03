@@ -158,3 +158,22 @@ def me(authorization: str | None = Header(default=None)):
         "message": "Session valid",
         "user": user
     }
+
+from fastapi import UploadFile, File
+import os
+
+UPLOAD_DIR = "/app/uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/upload")
+def upload_file(file: UploadFile = File(...)):
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+
+    with open(file_path, "wb") as f:
+        f.write(file.file.read())
+
+    return {
+        "message": "File uploaded",
+        "filename": file.filename,
+        "size_bytes": os.path.getsize(file_path)
+    }
