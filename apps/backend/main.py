@@ -186,6 +186,22 @@ def upload_file(
 
 import pandas as pd
 
+
+def detect_column_type(column_name: str) -> str:
+    name = column_name.lower().strip()
+
+    if "email" in name:
+        return "email"
+    if "phone" in name or "mobile" in name or "tel" in name:
+        return "phone"
+    if "name" in name:
+        return "person_name"
+    if "company" in name or "agency" in name or "brokerage" in name:
+        return "company"
+
+    return "unknown"
+
+
 @app.post("/profile-upload")
 def profile_upload(
     file: UploadFile = File(...),
@@ -219,9 +235,15 @@ def profile_upload(
 
     preview = df.head(5).fillna("").to_dict(orient="records")
 
+    column_types = {
+        col: detect_column_type(col)
+        for col in df.columns
+    }
+
     return {
         "file_type": file_type,
         "columns": list(df.columns),
+        "column_types": column_types,
         "row_count": int(df.shape[0]),
         "column_count": int(df.shape[1]),
         "preview": preview,
