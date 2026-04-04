@@ -167,6 +167,70 @@ def find_first_value(row: dict, column_map: dict, target_type: str) -> str:
             if value:
                 return value
     return ""
+def normalize_p_number(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().upper()
+
+
+def build_type_a_owner_map(sheet1: pd.DataFrame) -> dict:
+    owner_map = {}
+
+    if sheet1.empty:
+        return owner_map
+
+    first_col = sheet1.columns[0]
+
+    for _, row in sheet1.iterrows():
+        p_number = normalize_p_number(row.get(first_col))
+        if p_number:
+            owner_map[p_number] = row.to_dict()
+
+    return owner_map
+sheet2 = clean_dataframe(excel_file.parse(sheet_names[1], dtype=str).fillna(""))
+
+owner_map = build_type_a_owner_map(sheet1)
+
+for _, row in sheet2.iterrows():
+    raw_row = row.to_dict()
+
+    p_number = normalize_p_number(
+        row.get("P-NUMBER") or row.get("P_NUMBER") or row.get("PNUMBER")
+    )
+
+    owner_row = owner_map.get(p_number, {})
+
+    owner_name = first_non_empty(owner_row, [
+        "Owner Name", "OWNER NAME", "Name", "Customer Name", "Owner"
+    ])
+
+    owner_name_ar = first_non_empty(owner_row, [
+        "Owner Name Arabic", "OWNER NAME ARABIC", "Name Arabic"
+    ])
+
+    email = first_non_empty(owner_row, [
+        "Email", "EMAIL", "Email Address"
+    ])
+
+    phone = first_non_empty(owner_row, [
+        "Phone", "PHONE", "Mobile", "Contact Number"
+    ])
+
+    district = first_non_empty(raw_row, [
+        "District", "DISTRICT", "Area"
+    ])
+
+    master_community = first_non_empty(raw_row, [
+        "Master Community", "MASTER COMMUNITY", "Community"
+    ])
+
+    project_name = first_non_empty(raw_row, [
+        "Project", "PROJECT", "Project Name", "Building", "Cluster"
+    ])
+
+    sub_community = first_non_empty(raw_row, [
+        "Sub Community", "SUB COMMUNITY", "Cluster", "Phase"
+    ])
 
 
 def normalize_record(row: dict, column_map: dict, sheet_name: str) -> dict:
