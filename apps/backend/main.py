@@ -5,7 +5,7 @@ import secrets
 import hashlib
 from io import BytesIO
 
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Query
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 import psycopg
@@ -33,16 +33,46 @@ def hash_session_token(token: str) -> str:
 def clean_text(value) -> str:
     if value is None:
         return ""
-    return str(value).strip()
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
 
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.columns = [clean_text(col) for col in df.columns]
+    df.columns = [clean_text(col) if clean_text(col) else f"column_{i + 1}" for i, col in enumerate(df.columns)]
     df = df.fillna("")
-    for col in df.columns:
-        df[col] = df[col].astype(str).map(clean_text)
-    return df
+    return df.applymap(clean_text)
+
+
+def normalize_phone(value: str) -> str:
+    value = clean_text(value)
+    if not value:
+        return ""
+    return re.sub(r"[^\d+|]", "", value)
+
+
+def guess_bedroom_count(value) -> str:
+    text = clean_text(value).lower()
+    if not text:
+        return ""
+
+    patterns = [
+        r"(\d+)\s*bed",
+        r"(\d+)\s*br",
+        r"(\d+)\s*b/r",
+        r"studio",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            if pattern == "studio":
+                return "studio"
+            return match.group(1)
+
+    return ""
 
 
 def get_current_user_from_auth(authorization: str | None):
@@ -63,14 +93,15 @@ def get_current_user_from_auth(authorization: str | None):
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     u.id,
                     u.full_name,
                     u.email,
                     u.role,
                     u.status,
-                    t.id,
+                    u.tenant_id,
                     t.name
                 FROM active_sessions s
                 JOIN users u ON u.id = s.user_id
@@ -78,7 +109,9 @@ def get_current_user_from_auth(authorization: str | None):
                 WHERE s.session_token_hash = %s
                   AND s.is_revoked = FALSE
                 LIMIT 1
-            """, (token_hash,))
+                """,
+                (token_hash,),
+            )
             row = cur.fetchone()
 
             if not row:
@@ -89,11 +122,14 @@ def get_current_user_from_auth(authorization: str | None):
             if status != "active":
                 raise HTTPException(status_code=403, detail="User is not active")
 
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE active_sessions
                 SET last_seen_at = NOW()
                 WHERE session_token_hash = %s
-            """, (token_hash,))
+                """,
+                (token_hash,),
+            )
         conn.commit()
 
     return {
@@ -102,58 +138,77 @@ def get_current_user_from_auth(authorization: str | None):
         "email": email,
         "role": role,
         "tenant_id": str(tenant_id),
-        "tenant": tenant_name
+        "tenant": tenant_name,
     }
 
 
 def detect_column_type(column_name: str) -> str:
     name = clean_text(column_name).lower()
 
-    if ("owner" in name and "name" in name) or name in {"owner", "owner name", "name of owner"}:
-        return "owner_name"
-    if ("owner" in name and ("arabic" in name or "ar" in name)) or "owner name arabic" in name:
+    if not name:
+        return "unknown"
+
+    if "p-number" in name or "p number" in name:
+        return "plot_number"
+
+    if "owner" in name and "arabic" in name:
         return "owner_name_ar"
+    if "owner" in name and "name" in name:
+        return "owner_name"
+    if name in {"owner", "owner name"}:
+        return "owner_name"
+
+    if ("office" in name or "company" in name or "agency" in name or "brokerage" in name) and "arabic" in name:
+        return "company_name_ar"
+    if "office" in name or "company" in name or "agency" in name or "brokerage" in name:
+        return "company_name"
+
     if "email" in name:
         return "email"
-    if "phone" in name or "mobile" in name or "tel" in name or "contact" in name:
+
+    if "phone" in name or "mobile" in name or "tel" in name or "contact number" in name:
         return "phone"
-    if "district" in name or "area" in name:
+
+    if "district" in name or name == "area":
         return "district"
+
     if "master community" in name:
         return "master_community"
-    if "project" in name:
-        return "project_name"
-    if "community" in name or "cluster" in name or "sub community" in name or "sub_community" in name:
+
+    if "sub community" in name:
         return "sub_community"
+
+    if "community" in name:
+        return "master_community"
+
+    if "project" in name or "cluster" in name:
+        return "project_name"
+
     if "property type" in name or "unit type" in name:
         return "property_type"
-    if "bedroom" in name or name == "bed" or name == "beds" or name == "br":
+
+    if "bedroom" in name or name == "b/r" or name == "br":
         return "bedroom_count"
-    if "unit number" in name or name == "unit" or "apartment" in name or "villa number" in name:
+
+    if "unit number" in name or "unit no" in name or "apartment number" in name or "villa number" in name:
         return "unit_number"
-    if "building" in name or "tower" in name:
+
+    if "building name" in name or name == "tower" or name == "building":
         return "building_name"
-    if "plot" in name:
+
+    if "plot number" in name or "plot no" in name:
         return "plot_number"
+
     if "developer" in name:
         return "developer_name"
 
+    if "name arabic" in name:
+        return "owner_name_ar"
+
+    if "name english" in name or name == "name":
+        return "owner_name"
+
     return "unknown"
-
-
-def guess_bedroom_count(value: str) -> str:
-    text = clean_text(value).lower()
-    if not text:
-        return ""
-
-    m = re.search(r'(\d+)\s*(bed|beds|br|bedroom|bedrooms)', text)
-    if m:
-        return m.group(1)
-
-    if text == "studio":
-        return "studio"
-
-    return ""
 
 
 def build_column_map(df: pd.DataFrame) -> dict[str, str]:
@@ -167,10 +222,19 @@ def find_first_value(row: dict, column_map: dict, target_type: str) -> str:
             if value:
                 return value
     return ""
+
+
+def first_non_empty(row_dict: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = row_dict.get(key)
+        value = clean_text(value)
+        if value:
+            return value
+    return ""
+
+
 def normalize_p_number(value) -> str:
-    if value is None:
-        return ""
-    return str(value).strip().upper()
+    return clean_text(value).upper()
 
 
 def build_type_a_owner_map(sheet1: pd.DataFrame) -> dict:
@@ -187,50 +251,6 @@ def build_type_a_owner_map(sheet1: pd.DataFrame) -> dict:
             owner_map[p_number] = row.to_dict()
 
     return owner_map
-sheet2 = clean_dataframe(excel_file.parse(sheet_names[1], dtype=str).fillna(""))
-
-owner_map = build_type_a_owner_map(sheet1)
-
-for _, row in sheet2.iterrows():
-    raw_row = row.to_dict()
-
-    p_number = normalize_p_number(
-        row.get("P-NUMBER") or row.get("P_NUMBER") or row.get("PNUMBER")
-    )
-
-    owner_row = owner_map.get(p_number, {})
-
-    owner_name = first_non_empty(owner_row, [
-        "Owner Name", "OWNER NAME", "Name", "Customer Name", "Owner"
-    ])
-
-    owner_name_ar = first_non_empty(owner_row, [
-        "Owner Name Arabic", "OWNER NAME ARABIC", "Name Arabic"
-    ])
-
-    email = first_non_empty(owner_row, [
-        "Email", "EMAIL", "Email Address"
-    ])
-
-    phone = first_non_empty(owner_row, [
-        "Phone", "PHONE", "Mobile", "Contact Number"
-    ])
-
-    district = first_non_empty(raw_row, [
-        "District", "DISTRICT", "Area"
-    ])
-
-    master_community = first_non_empty(raw_row, [
-        "Master Community", "MASTER COMMUNITY", "Community"
-    ])
-
-    project_name = first_non_empty(raw_row, [
-        "Project", "PROJECT", "Project Name", "Building", "Cluster"
-    ])
-
-    sub_community = first_non_empty(raw_row, [
-        "Sub Community", "SUB COMMUNITY", "Cluster", "Phase"
-    ])
 
 
 def normalize_record(row: dict, column_map: dict, sheet_name: str) -> dict:
@@ -249,6 +269,57 @@ def normalize_record(row: dict, column_map: dict, sheet_name: str) -> dict:
     plot_number = find_first_value(row, column_map, "plot_number")
     developer_name = find_first_value(row, column_map, "developer_name")
 
+    if not owner_name:
+        owner_name = first_non_empty(
+            row,
+            ["Name English", "Owner Name", "OWNER NAME", "Name", "Customer Name", "Client Name"],
+        )
+
+    if not owner_name_ar:
+        owner_name_ar = first_non_empty(
+            row,
+            ["Name Arabic", "Owner Name Arabic", "OWNER NAME ARABIC"],
+        )
+
+    if not email:
+        email = first_non_empty(row, ["Email", "EMAIL", "E-mail"])
+
+    if not phone:
+        phone = first_non_empty(row, ["Phone", "PHONE", "Phone Number", "Mobile", "Mobile Number", "Tel"])
+
+    if not district:
+        district = first_non_empty(row, ["District", "DISTRICT", "Area"])
+
+    if not master_community:
+        master_community = first_non_empty(row, ["Master Community", "MASTER COMMUNITY", "Community"])
+
+    if not project_name:
+        project_name = first_non_empty(row, ["Project", "PROJECT", "Project Name", "Building", "Cluster"])
+
+    if not sub_community:
+        sub_community = first_non_empty(row, ["Sub Community", "SUB COMMUNITY", "Cluster", "Phase"])
+
+    if not property_type:
+        property_type = first_non_empty(row, ["Property Type", "PROPERTY TYPE", "Type", "Unit Type"])
+
+    if not bedroom_count:
+        bedroom_count = first_non_empty(row, ["Bedrooms", "BEDROOMS", "Bedroom", "B/R"])
+
+    if not unit_number:
+        unit_number = first_non_empty(
+            row,
+            ["Unit Number", "UNIT NUMBER", "Unit No", "Apartment Number", "Villa Number"],
+        )
+
+    if not building_name:
+        building_name = first_non_empty(row, ["Building Name", "BUILDING NAME", "Tower", "Building"])
+
+    if not plot_number:
+        plot_number = first_non_empty(row, ["Plot Number", "PLOT NUMBER", "Plot No", "P-NUMBER"])
+
+    if not developer_name:
+        developer_name = first_non_empty(row, ["Developer", "Developer Name", "DEVELOPER"])
+
     if not bedroom_count:
         for value in row.values():
             guessed = guess_bedroom_count(value)
@@ -256,17 +327,11 @@ def normalize_record(row: dict, column_map: dict, sheet_name: str) -> dict:
                 bedroom_count = guessed
                 break
 
-    if not master_community and district:
-        master_community = district
-
-    if not sub_community and project_name:
-        sub_community = project_name
-
     return {
         "owner_name": owner_name,
         "owner_name_ar": owner_name_ar,
         "email": email,
-        "phone": phone,
+        "phone": normalize_phone(phone),
         "district": district,
         "master_community": master_community,
         "project_name": project_name,
@@ -278,25 +343,53 @@ def normalize_record(row: dict, column_map: dict, sheet_name: str) -> dict:
         "plot_number": plot_number,
         "developer_name": developer_name,
         "source_sheet": sheet_name,
-        "raw_data": row
+        "raw_data": row,
     }
 
 
-def read_excel_sheets(file_bytes: bytes) -> dict[str, pd.DataFrame]:
-    excel_file = pd.ExcelFile(BytesIO(file_bytes))
-    sheets = {}
-    for sheet_name in excel_file.sheet_names:
-        df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, dtype=str).fillna("")
-        sheets[sheet_name] = clean_dataframe(df)
-    return sheets
+def profile_dataframe(df: pd.DataFrame, sheet_name: str) -> dict:
+    df = clean_dataframe(df)
+    column_map = build_column_map(df)
+    preview = df.head(5).to_dict(orient="records")
+
+    return {
+        "sheet_name": sheet_name,
+        "row_count": int(df.shape[0]),
+        "column_count": int(df.shape[1]),
+        "columns": list(df.columns),
+        "column_types": column_map,
+        "preview": preview,
+    }
 
 
-def detect_source_type(filename: str, sheets: dict[str, pd.DataFrame]) -> str:
-    if filename.lower().endswith(".csv"):
-        return "type_b"
-    if len(sheets) >= 2:
-        return "type_a"
-    return "type_b"
+def parse_uploaded_file(file: UploadFile, file_bytes: bytes) -> tuple[str, str, list[dict]]:
+    filename = clean_text(file.filename).lower()
+
+    try:
+        if filename.endswith(".csv"):
+            df = pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
+            df = clean_dataframe(df)
+            return "type_b", "csv", [{"sheet_name": "Sheet1", "dataframe": df}]
+
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            excel_file = pd.ExcelFile(BytesIO(file_bytes))
+            sheet_names = excel_file.sheet_names
+            sheets = []
+
+            for sheet_name in sheet_names:
+                df = excel_file.parse(sheet_name, dtype=str).fillna("")
+                df = clean_dataframe(df)
+                sheets.append({"sheet_name": sheet_name, "dataframe": df})
+
+            source_type = "type_a" if len(sheet_names) >= 2 else "type_b"
+            return source_type, "excel", sheets
+
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
 
 
 @app.get("/")
@@ -316,19 +409,22 @@ def login(payload: LoginRequest):
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT u.id, u.full_name, u.email, u.password_hash, u.role, u.status, t.name
+            cur.execute(
+                """
+                SELECT u.id, u.full_name, u.email, u.password_hash, u.role, u.status, t.id, t.name
                 FROM users u
                 JOIN tenants t ON t.id = u.tenant_id
                 WHERE LOWER(u.email) = LOWER(%s)
                 LIMIT 1
-            """, (payload.email,))
+                """,
+                (payload.email,),
+            )
             row = cur.fetchone()
 
             if not row:
                 raise HTTPException(status_code=401, detail="Invalid email or password")
 
-            user_id, full_name, email, password_hash, role, status, tenant_name = row
+            user_id, full_name, email, password_hash, role, status, tenant_id, tenant_name = row
 
             if status != "active":
                 raise HTTPException(status_code=403, detail="User is not active")
@@ -336,19 +432,25 @@ def login(payload: LoginRequest):
             if not pwd_context.verify(payload.password, password_hash):
                 raise HTTPException(status_code=401, detail="Invalid email or password")
 
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE active_sessions
                 SET is_revoked = TRUE, revoked_at = NOW()
                 WHERE user_id = %s AND is_revoked = FALSE
-            """, (user_id,))
+                """,
+                (user_id,),
+            )
 
             raw_token = secrets.token_urlsafe(32)
             token_hash = hash_session_token(raw_token)
 
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO active_sessions (user_id, session_token_hash, is_revoked)
                 VALUES (%s, %s, FALSE)
-            """, (user_id, token_hash))
+                """,
+                (user_id, token_hash),
+            )
 
         conn.commit()
 
@@ -360,8 +462,9 @@ def login(payload: LoginRequest):
             "full_name": full_name,
             "email": email,
             "role": role,
-            "tenant": tenant_name
-        }
+            "tenant_id": str(tenant_id),
+            "tenant": tenant_name,
+        },
     }
 
 
@@ -374,7 +477,7 @@ def me(authorization: str | None = Header(default=None)):
 @app.post("/upload")
 def upload_file(
     file: UploadFile = File(...),
-    authorization: str | None = Header(default=None)
+    authorization: str | None = Header(default=None),
 ):
     user = get_current_user_from_auth(authorization)
 
@@ -387,261 +490,217 @@ def upload_file(
         "message": "File uploaded",
         "filename": file.filename,
         "size_bytes": os.path.getsize(file_path),
-        "uploaded_by": user["email"]
+        "uploaded_by": user["email"],
     }
 
 
 @app.post("/profile-upload")
 def profile_upload(
     file: UploadFile = File(...),
-    authorization: str | None = Header(default=None)
+    authorization: str | None = Header(default=None),
 ):
     user = get_current_user_from_auth(authorization)
+
     file_bytes = file.file.read()
-    filename = file.filename or "uploaded_file"
+    source_type, file_type, sheets = parse_uploaded_file(file, file_bytes)
 
-    try:
-        if filename.lower().endswith(".csv"):
-            df = pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
-            df = clean_dataframe(df)
+    profiled_sheets = [
+        profile_dataframe(sheet["dataframe"], sheet["sheet_name"])
+        for sheet in sheets
+    ]
 
-            return {
-                "source_type": "type_b",
-                "file_type": "csv",
-                "sheet_count": 1,
-                "sheets": [
-                    {
-                        "sheet_name": "Sheet1",
-                        "row_count": int(df.shape[0]),
-                        "column_count": int(df.shape[1]),
-                        "columns": list(df.columns),
-                        "column_types": build_column_map(df),
-                        "preview": df.head(5).to_dict(orient="records")
-                    }
-                ],
-                "uploaded_by": user["email"]
-            }
-
-        if filename.lower().endswith((".xlsx", ".xls")):
-            sheets = read_excel_sheets(file_bytes)
-            result_sheets = []
-
-            for sheet_name, df in sheets.items():
-                result_sheets.append({
-                    "sheet_name": sheet_name,
-                    "row_count": int(df.shape[0]),
-                    "column_count": int(df.shape[1]),
-                    "columns": list(df.columns),
-                    "column_types": build_column_map(df),
-                    "preview": df.head(5).to_dict(orient="records")
-                })
-
-            return {
-                "source_type": detect_source_type(filename, sheets),
-                "file_type": "excel",
-                "sheet_count": len(sheets),
-                "sheets": result_sheets,
-                "uploaded_by": user["email"]
-            }
-
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+    return {
+        "source_type": source_type,
+        "file_type": file_type,
+        "sheet_count": len(profiled_sheets),
+        "sheets": profiled_sheets,
+        "uploaded_by": user["email"],
+    }
 
 
 @app.post("/import-upload")
 def import_upload(
     file: UploadFile = File(...),
-    authorization: str | None = Header(default=None)
+    authorization: str | None = Header(default=None),
 ):
     user = get_current_user_from_auth(authorization)
+
     file_bytes = file.file.read()
-    filename = file.filename or "uploaded_file"
+    source_type, file_type, sheets = parse_uploaded_file(file, file_bytes)
 
-    try:
-        if filename.lower().endswith(".csv"):
-            sheets = {
-                "Sheet1": clean_dataframe(
-                    pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
-                )
-            }
-            file_type = "csv"
-        elif filename.lower().endswith((".xlsx", ".xls")):
-            sheets = read_excel_sheets(file_bytes)
-            file_type = "excel"
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file type")
+    records_to_insert = []
 
-        source_type = detect_source_type(filename, sheets)
-        inserted_count = 0
+    if source_type == "type_a":
+        if len(sheets) < 2:
+            raise HTTPException(status_code=400, detail="Type A file must contain at least 2 sheets")
 
-        with psycopg.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO import_batches (
-                        tenant_id,
-                        uploaded_by,
-                        original_filename,
-                        source_type,
-                        file_type,
-                        sheet_count
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    user["tenant_id"],
-                    user["id"],
-                    filename,
+        sheet1 = sheets[0]["dataframe"]
+        sheet2 = sheets[1]["dataframe"]
+
+        owner_map = build_type_a_owner_map(sheet1)
+
+        merged_rows = []
+        for _, row in sheet2.iterrows():
+            raw_row = row.to_dict()
+            p_number = normalize_p_number(
+                first_non_empty(raw_row, ["P-NUMBER", "P NUMBER", "Plot Number", "Plot No", sheet2.columns[0]])
+            )
+            owner_row = owner_map.get(p_number, {})
+            merged = {}
+            merged.update(owner_row)
+            merged.update(raw_row)
+            merged_rows.append(merged)
+
+        if merged_rows:
+            merged_df = clean_dataframe(pd.DataFrame(merged_rows))
+            column_map = build_column_map(merged_df)
+
+            for _, row in merged_df.iterrows():
+                record = normalize_record(row.to_dict(), column_map, sheets[1]["sheet_name"])
+                if any(
+                    [
+                        record["owner_name"],
+                        record["email"],
+                        record["phone"],
+                        record["project_name"],
+                        record["master_community"],
+                        record["unit_number"],
+                        record["plot_number"],
+                    ]
+                ):
+                    records_to_insert.append(record)
+
+    else:
+        for sheet in sheets:
+            df = sheet["dataframe"]
+            column_map = build_column_map(df)
+
+            for _, row in df.iterrows():
+                record = normalize_record(row.to_dict(), column_map, sheet["sheet_name"])
+                if any(
+                    [
+                        record["owner_name"],
+                        record["email"],
+                        record["phone"],
+                        record["project_name"],
+                        record["master_community"],
+                        record["unit_number"],
+                        record["plot_number"],
+                    ]
+                ):
+                    records_to_insert.append(record)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO import_batches (
+                    tenant_id,
+                    uploaded_by,
+                    original_filename,
                     source_type,
                     file_type,
-                    len(sheets)
-                ))
-                import_batch_id = cur.fetchone()[0]
+                    sheet_count
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    user["tenant_id"],
+                    user["id"],
+                    file.filename,
+                    source_type,
+                    file_type,
+                    len(sheets),
+                ),
+            )
+            import_batch_id = cur.fetchone()[0]
 
-                for sheet_name, df in sheets.items():
-                    column_map = build_column_map(df)
+            for record in records_to_insert:
+                cur.execute(
+                    """
+                    INSERT INTO property_records (
+                        tenant_id,
+                        import_batch_id,
+                        owner_name,
+                        owner_name_ar,
+                        email,
+                        phone,
+                        district,
+                        master_community,
+                        project_name,
+                        sub_community,
+                        property_type,
+                        bedroom_count,
+                        unit_number,
+                        building_name,
+                        plot_number,
+                        developer_name,
+                        source_sheet,
+                        raw_data
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    """,
+                    (
+                        user["tenant_id"],
+                        import_batch_id,
+                        record["owner_name"],
+                        record["owner_name_ar"],
+                        record["email"],
+                        record["phone"],
+                        record["district"],
+                        record["master_community"],
+                        record["project_name"],
+                        record["sub_community"],
+                        record["property_type"],
+                        record["bedroom_count"],
+                        record["unit_number"],
+                        record["building_name"],
+                        record["plot_number"],
+                        record["developer_name"],
+                        record["source_sheet"],
+                        json.dumps(record["raw_data"]),
+                    ),
+                )
 
-                    for row in df.to_dict(orient="records"):
-                        normalized = normalize_record(row, column_map, sheet_name)
+        conn.commit()
 
-                        if not any([
-                            normalized["owner_name"],
-                            normalized["owner_name_ar"],
-                            normalized["email"],
-                            normalized["phone"],
-                            normalized["district"],
-                            normalized["master_community"],
-                            normalized["project_name"],
-                            normalized["sub_community"],
-                            normalized["unit_number"],
-                            normalized["building_name"],
-                            normalized["plot_number"]
-                        ]):
-                            continue
-
-                        cur.execute("""
-                            INSERT INTO property_records (
-                                tenant_id,
-                                import_batch_id,
-                                owner_name,
-                                owner_name_ar,
-                                email,
-                                phone,
-                                district,
-                                master_community,
-                                project_name,
-                                sub_community,
-                                property_type,
-                                bedroom_count,
-                                unit_number,
-                                building_name,
-                                plot_number,
-                                developer_name,
-                                source_sheet,
-                                raw_data
-                            )
-                            VALUES (
-                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s, %s, %s::jsonb
-                            )
-                        """, (
-                            user["tenant_id"],
-                            str(import_batch_id),
-                            normalized["owner_name"],
-                            normalized["owner_name_ar"],
-                            normalized["email"],
-                            normalized["phone"],
-                            normalized["district"],
-                            normalized["master_community"],
-                            normalized["project_name"],
-                            normalized["sub_community"],
-                            normalized["property_type"],
-                            normalized["bedroom_count"],
-                            normalized["unit_number"],
-                            normalized["building_name"],
-                            normalized["plot_number"],
-                            normalized["developer_name"],
-                            normalized["source_sheet"],
-                            json.dumps(normalized["raw_data"], ensure_ascii=False)
-                        ))
-                        inserted_count += 1
-
-            conn.commit()
-
-        return {
-            "message": "Import completed",
-            "filename": filename,
-            "source_type": source_type,
-            "file_type": file_type,
-            "sheet_count": len(sheets),
-            "records_imported": inserted_count,
-            "uploaded_by": user["email"]
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to import file: {str(e)}")
+    return {
+        "message": "Import completed",
+        "filename": file.filename,
+        "source_type": source_type,
+        "file_type": file_type,
+        "sheet_count": len(sheets),
+        "records_imported": len(records_to_insert),
+        "uploaded_by": user["email"],
+    }
 
 
 @app.get("/search")
-def search_records(
-    community: str | None = None,
-    project: str | None = None,
-    bedrooms: str | None = None,
-    unit_number: str | None = None,
-    owner_name: str | None = None,
-    authorization: str | None = Header(default=None)
+def search_properties(
+    authorization: str | None = Header(default=None),
+    owner_name: str = Query(default=""),
+    email: str = Query(default=""),
+    phone: str = Query(default=""),
+    district: str = Query(default=""),
+    master_community: str = Query(default=""),
+    project_name: str = Query(default=""),
+    sub_community: str = Query(default=""),
+    bedroom_count: str = Query(default=""),
+    unit_number: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
 ):
     user = get_current_user_from_auth(authorization)
 
-    where_parts = ["tenant_id = %s"]
-    params = [user["tenant_id"]]
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
 
-    if community:
-        where_parts.append("""
-            (
-                COALESCE(master_community, '') ILIKE %s OR
-                COALESCE(district, '') ILIKE %s OR
-                COALESCE(sub_community, '') ILIKE %s
-            )
-        """)
-        like_value = f"%{community}%"
-        params.extend([like_value, like_value, like_value])
-
-    if project:
-        where_parts.append("""
-            (
-                COALESCE(project_name, '') ILIKE %s OR
-                COALESCE(sub_community, '') ILIKE %s OR
-                COALESCE(building_name, '') ILIKE %s
-            )
-        """)
-        like_value = f"%{project}%"
-        params.extend([like_value, like_value, like_value])
-
-    if bedrooms:
-        where_parts.append("COALESCE(bedroom_count, '') ILIKE %s")
-        params.append(f"%{bedrooms}%")
-
-    if unit_number:
-        where_parts.append("COALESCE(unit_number, '') ILIKE %s")
-        params.append(f"%{unit_number}%")
-
-    if owner_name:
-        where_parts.append("""
-            (
-                COALESCE(owner_name, '') ILIKE %s OR
-                COALESCE(owner_name_ar, '') ILIKE %s
-            )
-        """)
-        like_value = f"%{owner_name}%"
-        params.extend([like_value, like_value])
-
-    query = f"""
+    sql = """
         SELECT
             id,
             owner_name,
@@ -659,41 +718,85 @@ def search_records(
             plot_number,
             developer_name,
             source_sheet,
-            raw_data
+            raw_data,
+            created_at
         FROM property_records
-        WHERE {' AND '.join(where_parts)}
-        ORDER BY created_at DESC
-        LIMIT 100
+        WHERE tenant_id = %s
     """
+    params = [user["tenant_id"]]
+
+    def add_filter(field_name: str, value: str):
+        nonlocal sql, params
+        value = clean_text(value)
+        if value:
+            sql += f" AND {field_name} ILIKE %s"
+            params.append(f"%{value}%")
+
+    add_filter("owner_name", owner_name)
+    add_filter("email", email)
+    add_filter("phone", phone)
+    add_filter("district", district)
+    add_filter("master_community", master_community)
+    add_filter("project_name", project_name)
+    add_filter("sub_community", sub_community)
+    add_filter("bedroom_count", bedroom_count)
+    add_filter("unit_number", unit_number)
+
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(limit)
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(sql, params)
             rows = cur.fetchall()
 
     results = []
     for row in rows:
-        results.append({
-            "id": str(row[0]),
-            "owner_name": row[1],
-            "owner_name_ar": row[2],
-            "email": row[3],
-            "phone": row[4],
-            "district": row[5],
-            "master_community": row[6],
-            "project_name": row[7],
-            "sub_community": row[8],
-            "property_type": row[9],
-            "bedroom_count": row[10],
-            "unit_number": row[11],
-            "building_name": row[12],
-            "plot_number": row[13],
-            "developer_name": row[14],
-            "source_sheet": row[15],
-            "raw_data": row[16]
-        })
+        (
+            record_id,
+            owner_name_val,
+            owner_name_ar_val,
+            email_val,
+            phone_val,
+            district_val,
+            master_community_val,
+            project_name_val,
+            sub_community_val,
+            property_type_val,
+            bedroom_count_val,
+            unit_number_val,
+            building_name_val,
+            plot_number_val,
+            developer_name_val,
+            source_sheet_val,
+            raw_data_val,
+            created_at_val,
+        ) = row
+
+        results.append(
+            {
+                "id": str(record_id),
+                "owner_name": owner_name_val,
+                "owner_name_ar": owner_name_ar_val,
+                "email": email_val,
+                "phone": phone_val,
+                "district": district_val,
+                "master_community": master_community_val,
+                "project_name": project_name_val,
+                "sub_community": sub_community_val,
+                "property_type": property_type_val,
+                "bedroom_count": bedroom_count_val,
+                "unit_number": unit_number_val,
+                "building_name": building_name_val,
+                "plot_number": plot_number_val,
+                "developer_name": developer_name_val,
+                "source_sheet": source_sheet_val,
+                "raw_data": raw_data_val,
+                "created_at": created_at_val.isoformat() if created_at_val else None,
+            }
+        )
 
     return {
         "count": len(results),
-        "results": results
+        "results": results,
     }
