@@ -12,6 +12,7 @@ export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
+  const [profileResult, setProfileResult] = useState(null);
 
   async function loadCurrentUser(token) {
     try {
@@ -78,6 +79,7 @@ export default function HomePage() {
   async function handleUpload(e) {
     e.preventDefault();
     setUploadResult(null);
+    setProfileResult(null);
     setError("");
 
     if (!selectedFile) {
@@ -94,24 +96,43 @@ export default function HomePage() {
     setUploading(true);
 
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
+      const uploadFormData = new FormData();
+      uploadFormData.append("file", selectedFile);
 
-      const res = await fetch("/api/upload", {
+      const uploadRes = await fetch("/api/upload", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`
         },
-        body: formData
+        body: uploadFormData
       });
 
-      const data = await res.json();
+      const uploadData = await uploadRes.json();
 
-      if (!res.ok) {
-        throw new Error(data.detail || "Upload failed");
+      if (!uploadRes.ok) {
+        throw new Error(uploadData.detail || "Upload failed");
       }
 
-      setUploadResult(data);
+      setUploadResult(uploadData);
+
+      const profileFormData = new FormData();
+      profileFormData.append("file", selectedFile);
+
+      const profileRes = await fetch("/api/profile-upload", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        body: profileFormData
+      });
+
+      const profileData = await profileRes.json();
+
+      if (!profileRes.ok) {
+        throw new Error(profileData.detail || "Profiling failed");
+      }
+
+      setProfileResult(profileData);
     } catch (err) {
       setError(err.message || "Upload failed");
     } finally {
@@ -124,6 +145,8 @@ export default function HomePage() {
     setUser(null);
     setSelectedFile(null);
     setUploadResult(null);
+    setProfileResult(null);
+    setError("");
   }
 
   if (checkingSession) {
@@ -137,7 +160,7 @@ export default function HomePage() {
 
   if (user) {
     return (
-      <main style={{ maxWidth: 820, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
+      <main style={{ maxWidth: 980, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", fontFamily: "Arial, sans-serif" }}>
         <h1 style={{ marginTop: 0 }}>Tru Property Lookup</h1>
         <p>Welcome to the dashboard.</p>
 
@@ -177,7 +200,7 @@ export default function HomePage() {
               fontWeight: 700
             }}
           >
-            {uploading ? "Uploading..." : "Upload File"}
+            {uploading ? "Uploading and profiling..." : "Upload File"}
           </button>
         </form>
 
@@ -187,6 +210,80 @@ export default function HomePage() {
             <div style={{ marginTop: 8 }}>Filename: {uploadResult.filename}</div>
             <div>Size: {uploadResult.size_bytes} bytes</div>
             <div>Uploaded by: {uploadResult.uploaded_by}</div>
+          </div>
+        ) : null}
+
+        {profileResult ? (
+          <div style={{ marginTop: 20, padding: 16, borderRadius: 10, background: "#f8fafc" }}>
+            <h2 style={{ marginTop: 0 }}>File Profile</h2>
+
+            <div><strong>File type:</strong> {profileResult.file_type}</div>
+            <div><strong>Rows:</strong> {profileResult.row_count}</div>
+            <div><strong>Columns:</strong> {profileResult.column_count}</div>
+
+            <div style={{ marginTop: 16 }}>
+              <strong>Detected columns</strong>
+              <table style={{ width: "100%", marginTop: 10, borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #d1d5db" }}>Column</th>
+                    <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #d1d5db" }}>Detected type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {profileResult.columns.map((col) => (
+                    <tr key={col}>
+                      <td style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>{col}</td>
+                      <td style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>
+                        {profileResult.column_types?.[col] || "unknown"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ marginTop: 20 }}>
+              <strong>Preview</strong>
+              <div style={{ overflowX: "auto", marginTop: 10 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {profileResult.columns.map((col) => (
+                        <th
+                          key={col}
+                          style={{
+                            textAlign: "left",
+                            padding: 10,
+                            borderBottom: "1px solid #d1d5db",
+                            background: "#f1f5f9"
+                          }}
+                        >
+                          {col}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {profileResult.preview.map((row, idx) => (
+                      <tr key={idx}>
+                        {profileResult.columns.map((col) => (
+                          <td
+                            key={col}
+                            style={{
+                              padding: 10,
+                              borderBottom: "1px solid #e5e7eb"
+                            }}
+                          >
+                            {row[col] ?? ""}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         ) : null}
 
