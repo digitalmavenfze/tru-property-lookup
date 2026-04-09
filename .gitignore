@@ -12,3 +12,13 @@ storage/
 *.before-*
 *.fix.*
 *.bak.*
+
+# local runtime / generated files
+apps/frontend/.next/
+apps/frontend/node_modules/
+apps/frontend/package-lock.json
+apps/backend/__pycache__/
+apps/backend/.env
+backups/
+storage/
+*.pyc
