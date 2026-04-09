@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -26,7 +27,90 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SheetMappingItem(BaseModel):
+    sheet_id: str
+    mappings: dict[str, str]
+
+
+class FinalizeImportRequest(BaseModel):
+    uploaded_file_id: str
+    sheets: list[SheetMappingItem]
+    duplicate_action: str | None = None
+
+
+REQUIRED_SYSTEM_FIELDS = {
+    "property_building_name",
+    "property_unit_number",
+}
+
+SYSTEM_FIELDS = {
+    "owner_full_name",
+    "property_plot_number",
+    "property_p_number",
+    "property_municipality_number",
+    "owner_first_name",
+    "owner_last_name",
+    "owner_email",
+    "owner_phone",
+    "owner_mailing_address",
+    "owner_nationality",
+    "property_city",
+    "property_district",
+    "property_master_community",
+    "property_community",
+    "property_building_name",
+    "property_villa_name",
+    "property_unit_number",
+    "property_type",
+    "property_developer_name",
+    "transaction_type",
+    "transaction_date",
+    "transaction_price",
+    "transaction_currency",
+    "transaction_notes",
+}
+
+
+
+
+class SheetMappingItem(BaseModel):
+    sheet_id: str
+    mappings: dict[str, str]
+
+
+class FinalizeImportRequest(BaseModel):
+    uploaded_file_id: str
+    sheets: list[SheetMappingItem]
+    duplicate_action: str | None = None
+
+
+
+
+def normalize_header_name(header: str | None) -> str:
+    if header is None:
+        return ""
+    value = str(header).strip()
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", value).lower()
+
 def hash_session_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def hash_file_bytes(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def normalize_mapping_value(value):
+    if value is None:
+        return ""
+    value = str(value).strip()
+    if not value:
+        return ""
+    if value.lower().startswith("unnamed:"):
+        return ""
+    return value
+
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -73,6 +157,423 @@ def guess_bedroom_count(value) -> str:
             return match.group(1)
 
     return ""
+
+
+def save_upload_to_disk(filename: str, file_bytes: bytes) -> str:
+    safe_name = f"{secrets.token_hex(8)}_{os.path.basename(filename)}"
+    file_path = os.path.join(UPLOAD_DIR, safe_name)
+    with open(file_path, "wb") as f:
+        f.write(file_bytes)
+    return safe_name
+
+
+def parse_date_or_none(value):
+    value = clean_text(value)
+    if not value:
+        return None
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except Exception:
+        return None
+
+
+def build_sheet_response(sheet: dict, preview_rows: int = 5) -> dict:
+    df = sheet["dataframe"]
+    preview = df.head(preview_rows).to_dict(orient="records")
+    return {
+        "sheet_name": sheet["sheet_name"],
+        "sheet_index": sheet["sheet_index"],
+        "row_count": len(df.index),
+        "column_count": len(df.columns),
+        "headers": list(df.columns),
+        "preview": preview,
+    }
+
+
+def get_existing_owner_id(cur, tenant_id: str, full_name: str, email: str, phone: str):
+    if email:
+        cur.execute(
+            """
+            SELECT id
+            FROM owners
+            WHERE tenant_id = %s AND lower(coalesce(email, '')) = %s
+            LIMIT 1
+            """,
+            (tenant_id, email.lower()),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    if phone:
+        cur.execute(
+            """
+            SELECT id
+            FROM owners
+            WHERE tenant_id = %s AND coalesce(phone, '') = %s
+            LIMIT 1
+            """,
+            (tenant_id, phone),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    if full_name:
+        cur.execute(
+            """
+            SELECT id
+            FROM owners
+            WHERE tenant_id = %s AND lower(coalesce(full_name, '')) = %s
+            LIMIT 1
+            """,
+            (tenant_id, full_name.lower()),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    return None
+
+
+def upsert_owner(
+    cur,
+    tenant_id: str,
+    owner_full_name: str,
+    owner_first_name: str,
+    owner_last_name: str,
+    owner_email: str,
+    owner_phone: str,
+    owner_mailing_address: str,
+    owner_nationality: str,
+    raw_data: dict,
+):
+    owner_id = get_existing_owner_id(
+        cur,
+        tenant_id,
+        owner_full_name,
+        owner_email,
+        owner_phone,
+    )
+
+    if owner_id:
+        cur.execute(
+            """
+            UPDATE owners
+            SET
+                full_name = COALESCE(NULLIF(%s, ''), full_name),
+                first_name = COALESCE(NULLIF(%s, ''), first_name),
+                last_name = COALESCE(NULLIF(%s, ''), last_name),
+                email = COALESCE(NULLIF(%s, ''), email),
+                phone = COALESCE(NULLIF(%s, ''), phone),
+                mailing_address = COALESCE(NULLIF(%s, ''), mailing_address),
+                nationality = COALESCE(NULLIF(%s, ''), nationality),
+                raw_data = COALESCE(raw_data, '{}'::jsonb) || %s::jsonb,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (
+                owner_full_name,
+                owner_first_name,
+                owner_last_name,
+                owner_email,
+                owner_phone,
+                owner_mailing_address,
+                owner_nationality,
+                json.dumps(raw_data),
+                owner_id,
+            ),
+        )
+        return owner_id
+
+    cur.execute(
+        """
+        INSERT INTO owners (
+            tenant_id,
+            full_name,
+            first_name,
+            last_name,
+            email,
+            phone,
+            mailing_address,
+            nationality,
+            raw_data
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            tenant_id,
+            owner_full_name,
+            owner_first_name,
+            owner_last_name,
+            owner_email,
+            owner_phone,
+            owner_mailing_address,
+            owner_nationality,
+            json.dumps(raw_data),
+        ),
+    )
+    return cur.fetchone()[0]
+
+
+def get_existing_property_id(
+    cur,
+    tenant_id: str,
+    city: str,
+    district: str,
+    master_community: str,
+    community: str,
+    building_name: str,
+    villa_name: str,
+    unit_number: str,
+    plot_number: str,
+    p_number: str,
+    municipality_number: str,
+):
+    city = clean_text(city)
+    district = clean_text(district)
+    master_community = clean_text(master_community)
+    community = clean_text(community)
+    building_name = clean_text(building_name)
+    villa_name = clean_text(villa_name)
+    unit_number = clean_text(unit_number)
+    plot_number = clean_text(plot_number)
+    p_number = clean_text(p_number)
+    municipality_number = clean_text(municipality_number)
+
+    # 1) Best match: unit + building + community
+    if unit_number and building_name and community:
+        cur.execute(
+            """
+            SELECT id
+            FROM properties
+            WHERE tenant_id = %s
+              AND coalesce(unit_number, '') = %s
+              AND coalesce(building_name, '') = %s
+              AND coalesce(community, '') = %s
+            LIMIT 1
+            """,
+            (tenant_id, unit_number, building_name, community),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    # 2) Villa-style match
+    if villa_name and community:
+        cur.execute(
+            """
+            SELECT id
+            FROM properties
+            WHERE tenant_id = %s
+              AND coalesce(villa_name, '') = %s
+              AND coalesce(community, '') = %s
+            LIMIT 1
+            """,
+            (tenant_id, villa_name, community),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    # 3) Plot + municipality + community together only
+    if plot_number and municipality_number and community:
+        cur.execute(
+            """
+            SELECT id
+            FROM properties
+            WHERE tenant_id = %s
+              AND coalesce(plot_number, '') = %s
+              AND coalesce(municipality_number, '') = %s
+              AND coalesce(community, '') = %s
+            LIMIT 1
+            """,
+            (tenant_id, plot_number, municipality_number, community),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    # 4) P-number only if paired with community
+    if p_number and community:
+        cur.execute(
+            """
+            SELECT id
+            FROM properties
+            WHERE tenant_id = %s
+              AND coalesce(p_number, '') = %s
+              AND coalesce(community, '') = %s
+            LIMIT 1
+            """,
+            (tenant_id, p_number, community),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    # 5) Careful broad fallback only if enough detail exists
+    if community and (building_name or villa_name or unit_number):
+        cur.execute(
+            """
+            SELECT id
+            FROM properties
+            WHERE tenant_id = %s
+              AND coalesce(city, '') = %s
+              AND coalesce(district, '') = %s
+              AND coalesce(master_community, '') = %s
+              AND coalesce(community, '') = %s
+              AND coalesce(building_name, '') = %s
+              AND coalesce(villa_name, '') = %s
+              AND coalesce(unit_number, '') = %s
+            LIMIT 1
+            """,
+            (
+                tenant_id,
+                city,
+                district,
+                master_community,
+                community,
+                building_name,
+                villa_name,
+                unit_number,
+            ),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    return None
+
+
+def upsert_property(
+    cur,
+    tenant_id: str,
+    city: str,
+    district: str,
+    master_community: str,
+    community: str,
+    building_name: str,
+    villa_name: str,
+    property_type: str,
+    unit_number: str,
+    developer_name: str,
+    plot_number: str,
+    p_number: str,
+    municipality_number: str,
+    raw_data: dict,
+):
+    if not any([
+        unit_number,
+        building_name,
+        villa_name,
+        community,
+        master_community,
+        district,
+        city,
+        plot_number,
+        p_number,
+        municipality_number,
+    ]):
+        return None
+
+    property_id = get_existing_property_id(
+        cur,
+        tenant_id,
+        city,
+        district,
+        master_community,
+        community,
+        building_name,
+        villa_name,
+        unit_number,
+        plot_number,
+        p_number,
+        municipality_number,
+    )
+
+    if property_id:
+        cur.execute(
+            """
+            UPDATE properties
+            SET
+                property_type = COALESCE(NULLIF(%s, ''), property_type),
+                developer_name = COALESCE(NULLIF(%s, ''), developer_name),
+                city = COALESCE(NULLIF(%s, ''), city),
+                district = COALESCE(NULLIF(%s, ''), district),
+                master_community = COALESCE(NULLIF(%s, ''), master_community),
+                community = COALESCE(NULLIF(%s, ''), community),
+                building_name = COALESCE(NULLIF(%s, ''), building_name),
+                villa_name = COALESCE(NULLIF(%s, ''), villa_name),
+                unit_number = COALESCE(NULLIF(%s, ''), unit_number),
+                plot_number = COALESCE(NULLIF(%s, ''), plot_number),
+                p_number = COALESCE(NULLIF(%s, ''), p_number),
+                municipality_number = COALESCE(NULLIF(%s, ''), municipality_number),
+                raw_data = COALESCE(raw_data, '{}'::jsonb) || %s::jsonb,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (
+                property_type,
+                developer_name,
+                city,
+                district,
+                master_community,
+                community,
+                building_name,
+                villa_name,
+                unit_number,
+                plot_number,
+                p_number,
+                municipality_number,
+                json.dumps(raw_data),
+                property_id,
+            ),
+        )
+        return property_id
+
+    cur.execute(
+        """
+        INSERT INTO properties (
+            tenant_id,
+            city,
+            district,
+            master_community,
+            community,
+            building_name,
+            villa_name,
+            property_type,
+            unit_number,
+            developer_name,
+            plot_number,
+            p_number,
+            municipality_number,
+            raw_data
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            tenant_id,
+            city,
+            district,
+            master_community,
+            community,
+            building_name,
+            villa_name,
+            property_type,
+            unit_number,
+            developer_name,
+            plot_number,
+            p_number,
+            municipality_number,
+            json.dumps(raw_data),
+        ),
+    )
+    return cur.fetchone()[0]
 
 
 def get_current_user_from_auth(authorization: str | None):
@@ -369,17 +870,29 @@ def parse_uploaded_file(file: UploadFile, file_bytes: bytes) -> tuple[str, str, 
         if filename.endswith(".csv"):
             df = pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
             df = clean_dataframe(df)
-            return "type_b", "csv", [{"sheet_name": "Sheet1", "dataframe": df}]
+            return "type_b", "csv", [
+                {
+                    "sheet_name": "Sheet1",
+                    "sheet_index": 0,
+                    "dataframe": df,
+                }
+            ]
 
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             excel_file = pd.ExcelFile(BytesIO(file_bytes))
             sheet_names = excel_file.sheet_names
             sheets = []
 
-            for sheet_name in sheet_names:
+            for sheet_index, sheet_name in enumerate(sheet_names):
                 df = excel_file.parse(sheet_name, dtype=str).fillna("")
                 df = clean_dataframe(df)
-                sheets.append({"sheet_name": sheet_name, "dataframe": df})
+                sheets.append(
+                    {
+                        "sheet_name": sheet_name,
+                        "sheet_index": sheet_index,
+                        "dataframe": df,
+                    }
+                )
 
             source_type = "type_a" if len(sheet_names) >= 2 else "type_b"
             return source_type, "excel", sheets
@@ -390,7 +903,6 @@ def parse_uploaded_file(file: UploadFile, file_bytes: bytes) -> tuple[str, str, 
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
-
 
 @app.get("/")
 def root():
@@ -504,18 +1016,1082 @@ def profile_upload(
     file_bytes = file.file.read()
     source_type, file_type, sheets = parse_uploaded_file(file, file_bytes)
 
-    profiled_sheets = [
-        profile_dataframe(sheet["dataframe"], sheet["sheet_name"])
-        for sheet in sheets
-    ]
+    if len(file_bytes) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File exceeds 50 MB limit")
+
+    file_hash = hash_file_bytes(file_bytes)
+
+    existing_file = None
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, original_filename, created_at
+                FROM uploaded_files
+                WHERE tenant_id = %s
+                  AND file_hash = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user["tenant_id"], file_hash),
+            )
+            existing_file = cur.fetchone()
+
+    stored_filename = save_upload_to_disk(file.filename, file_bytes)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO uploaded_files (
+                    tenant_id,
+                    uploaded_by,
+                    original_filename,
+                    stored_filename,
+                    file_type,
+                    file_size_bytes,
+                    file_hash,
+                    status,
+                    sheet_count
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    user["tenant_id"],
+                    user["id"],
+                    file.filename,
+                    stored_filename,
+                    file_type,
+                    len(file_bytes),
+                    file_hash,
+                    "profiled",
+                    len(sheets),
+                ),
+            )
+            uploaded_file_id = cur.fetchone()[0]
+
+            sheet_items = []
+            for sheet in sheets:
+                df = sheet["dataframe"]
+                headers = list(df.columns)
+
+                cur.execute(
+                    """
+                    INSERT INTO uploaded_file_sheets (
+                        uploaded_file_id,
+                        sheet_name,
+                        sheet_index,
+                        row_count,
+                        column_count,
+                        headers
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        uploaded_file_id,
+                        sheet["sheet_name"],
+                        sheet["sheet_index"],
+                        len(df.index),
+                        len(df.columns),
+                        json.dumps(headers),
+                    ),
+                )
+                sheet_id = cur.fetchone()[0]
+
+                sheet_items.append(
+                    {
+                        "sheet_id": str(sheet_id),
+                        **build_sheet_response(sheet),
+                    }
+                )
+
+        conn.commit()
 
     return {
+        "message": "File profiled successfully",
+        "uploaded_file_id": str(uploaded_file_id),
+        "duplicate_detected": bool(existing_file),
+        "duplicate_of_uploaded_file_id": str(existing_file[0]) if existing_file else None,
+        "duplicate_filename": existing_file[1] if existing_file else None,
+        "duplicate_created_at": existing_file[2].isoformat() if existing_file else None,
         "source_type": source_type,
         "file_type": file_type,
-        "sheet_count": len(profiled_sheets),
-        "sheets": profiled_sheets,
+        "sheet_count": len(sheet_items),
+        "sheets": sheet_items,
+        "system_fields": sorted(list(SYSTEM_FIELDS)),
         "uploaded_by": user["email"],
     }
+
+
+
+def save_upload_to_disk(filename: str, file_bytes: bytes) -> str:
+    safe_name = f"{secrets.token_hex(8)}_{os.path.basename(filename)}"
+    file_path = os.path.join(UPLOAD_DIR, safe_name)
+    with open(file_path, "wb") as f:
+        f.write(file_bytes)
+    return safe_name
+
+
+def parse_date_or_none(value):
+    value = clean_text(value)
+    if not value:
+        return None
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except Exception:
+        return None
+
+
+def parse_decimal_or_none(value):
+    value = clean_text(value).replace(",", "")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def build_sheet_response(sheet, preview_rows: int = 5):
+    df = sheet["dataframe"]
+    return {
+        "sheet_name": sheet["sheet_name"],
+        "sheet_index": sheet["sheet_index"],
+        "row_count": len(df.index),
+        "column_count": len(df.columns),
+        "headers": list(df.columns),
+        "preview": df.head(preview_rows).to_dict(orient="records"),
+    }
+
+
+def find_owner_id(cur, tenant_id, full_name, email, phone, raw_data):
+    normalized_email = clean_text(email).lower()
+    normalized_phone = clean_text(phone)
+    normalized_name = clean_text(full_name).lower()
+
+    owner_id = None
+
+    if normalized_email:
+        cur.execute(
+            """
+            SELECT id
+            FROM owners
+            WHERE tenant_id = %s AND lower(coalesce(email, '')) = %s
+            LIMIT 1
+            """,
+            (tenant_id, normalized_email),
+        )
+        row = cur.fetchone()
+        if row:
+            owner_id = row[0]
+
+    if owner_id is None and normalized_phone:
+        cur.execute(
+            """
+            SELECT id
+            FROM owners
+            WHERE tenant_id = %s AND coalesce(phone, '') = %s
+            LIMIT 1
+            """,
+            (tenant_id, normalized_phone),
+        )
+        row = cur.fetchone()
+        if row:
+            owner_id = row[0]
+
+    if owner_id is None and normalized_name:
+        cur.execute(
+            """
+            SELECT id
+            FROM owners
+            WHERE tenant_id = %s AND lower(coalesce(full_name, '')) = %s
+            LIMIT 1
+            """,
+            (tenant_id, normalized_name),
+        )
+        row = cur.fetchone()
+        if row:
+            owner_id = row[0]
+
+    if owner_id:
+        cur.execute(
+            """
+            UPDATE owners
+            SET
+                full_name = COALESCE(NULLIF(%s, ''), full_name),
+                first_name = COALESCE(NULLIF(%s, ''), first_name),
+                last_name = COALESCE(NULLIF(%s, ''), last_name),
+                email = COALESCE(NULLIF(%s, ''), email),
+                phone = COALESCE(NULLIF(%s, ''), phone),
+                mailing_address = COALESCE(NULLIF(%s, ''), mailing_address),
+                nationality = COALESCE(NULLIF(%s, ''), nationality),
+                raw_data = COALESCE(raw_data, '{}'::jsonb) || %s::jsonb,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (
+                clean_text(raw_data.get("full_name", "")),
+                clean_text(raw_data.get("first_name", "")),
+                clean_text(raw_data.get("last_name", "")),
+                clean_text(raw_data.get("email", "")),
+                clean_text(raw_data.get("phone", "")),
+                clean_text(raw_data.get("mailing_address", "")),
+                clean_text(raw_data.get("nationality", "")),
+                json.dumps(raw_data),
+                owner_id,
+            ),
+        )
+        return owner_id
+
+    cur.execute(
+        """
+        INSERT INTO owners (
+            tenant_id,
+            full_name,
+            first_name,
+            last_name,
+            email,
+            phone,
+            mailing_address,
+            nationality,
+            raw_data
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            tenant_id,
+            clean_text(raw_data.get("full_name", "")),
+            clean_text(raw_data.get("first_name", "")),
+            clean_text(raw_data.get("last_name", "")),
+            clean_text(raw_data.get("email", "")),
+            clean_text(raw_data.get("phone", "")),
+            clean_text(raw_data.get("mailing_address", "")),
+            clean_text(raw_data.get("nationality", "")),
+            json.dumps(raw_data),
+        ),
+    )
+    return cur.fetchone()[0]
+
+
+def find_property_id(cur, tenant_id, city, district, master_community, community, building_name, villa_name, unit_number, property_type, developer_name, raw_data):
+    if not any([city, district, master_community, community, building_name, villa_name, unit_number]):
+        return None
+
+    cur.execute(
+        """
+        SELECT id
+        FROM properties
+        WHERE tenant_id = %s
+          AND coalesce(city, '') = %s
+          AND coalesce(district, '') = %s
+          AND coalesce(master_community, '') = %s
+          AND coalesce(community, '') = %s
+          AND coalesce(building_name, '') = %s
+          AND coalesce(villa_name, '') = %s
+          AND coalesce(unit_number, '') = %s
+        LIMIT 1
+        """,
+        (
+            tenant_id,
+            clean_text(city),
+            clean_text(district),
+            clean_text(master_community),
+            clean_text(community),
+            clean_text(building_name),
+            clean_text(villa_name),
+            clean_text(unit_number),
+        ),
+    )
+    row = cur.fetchone()
+
+    if row:
+        property_id = row[0]
+        cur.execute(
+            """
+            UPDATE properties
+            SET
+                property_type = COALESCE(NULLIF(%s, ''), property_type),
+                developer_name = COALESCE(NULLIF(%s, ''), developer_name),
+                raw_data = COALESCE(raw_data, '{}'::jsonb) || %s::jsonb,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (
+                clean_text(property_type),
+                clean_text(developer_name),
+                json.dumps(raw_data),
+                property_id,
+            ),
+        )
+        return property_id
+
+    cur.execute(
+        """
+        INSERT INTO properties (
+            tenant_id,
+            city,
+            district,
+            master_community,
+            community,
+            building_name,
+            villa_name,
+            property_type,
+            unit_number,
+            developer_name,
+            raw_data
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            tenant_id,
+            clean_text(city),
+            clean_text(district),
+            clean_text(master_community),
+            clean_text(community),
+            clean_text(building_name),
+            clean_text(villa_name),
+            clean_text(property_type),
+            clean_text(unit_number),
+            clean_text(developer_name),
+            json.dumps(raw_data),
+        ),
+    )
+    return cur.fetchone()[0]
+
+
+@app.post("/finalize-import")
+def finalize_import(
+    payload: FinalizeImportRequest,
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+
+    required_missing = []
+
+    for sheet in payload.sheets:
+        mappings = {k: normalize_mapping_value(v) for k, v in sheet.mappings.items()}
+        mapped_targets = {v for v in mappings.values() if v}
+
+        for required_field in REQUIRED_SYSTEM_FIELDS:
+            if required_field not in mapped_targets:
+                required_missing.append(required_field)
+
+    if required_missing:
+        missing_unique = sorted(set(required_missing))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required mappings: {', '.join(missing_unique)}"
+        )
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    uploaded_file_id = payload.uploaded_file_id
+    requested_sheet_ids = {item.sheet_id for item in payload.sheets}
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, stored_filename, original_filename
+                FROM uploaded_files
+                WHERE id = %s AND tenant_id = %s
+                LIMIT 1
+                """,
+                (uploaded_file_id, user["tenant_id"]),
+            )
+            upload_row = cur.fetchone()
+
+            if not upload_row:
+                raise HTTPException(status_code=404, detail="Uploaded file not found")
+
+            _, stored_filename, original_filename = upload_row
+            file_path = os.path.join(UPLOAD_DIR, stored_filename or "")
+
+            if not stored_filename or not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail="Stored upload file not found on server")
+
+            cur.execute(
+                """
+                SELECT id, sheet_name, sheet_index
+                FROM uploaded_file_sheets
+                WHERE uploaded_file_id = %s
+                ORDER BY sheet_index
+                """,
+                (uploaded_file_id,),
+            )
+            db_sheets = cur.fetchall()
+
+            db_sheet_map = {
+                str(row[0]): {
+                    "id": row[0],
+                    "sheet_name": row[1],
+                    "sheet_index": row[2],
+                }
+                for row in db_sheets
+            }
+
+            for sheet_id in requested_sheet_ids:
+                if sheet_id not in db_sheet_map:
+                    raise HTTPException(status_code=400, detail=f"Invalid sheet_id: {sheet_id}")
+
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+
+            class LocalUploadFile:
+                def __init__(self, filename: str):
+                    self.filename = filename
+
+            source_type, file_type, sheets = parse_uploaded_file(
+                LocalUploadFile(original_filename),
+                file_bytes,
+            )
+
+            parsed_sheet_map = {
+                sheet["sheet_index"]: sheet
+                for sheet in sheets
+            }
+
+            for sheet_item in payload.sheets:
+                for source_column, target_field in sheet_item.mappings.items():
+                    if target_field not in SYSTEM_FIELDS:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid target field: {target_field}",
+                        )
+
+                    if not clean_text(source_column):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Source column name cannot be empty",
+                        )
+
+            cur.execute(
+                "DELETE FROM uploaded_file_mappings WHERE uploaded_file_id = %s",
+                (uploaded_file_id,),
+            )
+
+            records_created = 0
+            owners_linked = 0
+            transactions_created = 0
+
+            for sheet_item in payload.sheets:
+                db_sheet = db_sheet_map[sheet_item.sheet_id]
+                sheet_index = db_sheet["sheet_index"]
+                parsed_sheet = parsed_sheet_map.get(sheet_index)
+
+                if not parsed_sheet:
+                    continue
+
+                df = parsed_sheet["dataframe"]
+
+                for source_column, target_field in sheet_item.mappings.items():
+                    cur.execute(
+                        """
+                        INSERT INTO uploaded_file_mappings (
+                            uploaded_file_id,
+                            uploaded_file_sheet_id,
+                            source_column_name,
+                            target_field,
+                            is_required
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            uploaded_file_id,
+                            db_sheet["id"],
+                            source_column,
+                            target_field,
+                            target_field in {"owner_full_name", "property_unit_number"},
+                        ),
+                    )
+
+                for _, row in df.iterrows():
+                    raw_row = {k: clean_text(v) for k, v in row.to_dict().items()}
+                    mappings = sheet_item.mappings
+
+                    def mapped(system_field: str) -> str:
+                        source_col = None
+                        for column_name, target_name in mappings.items():
+                            if target_name == system_field:
+                                source_col = column_name
+                                break
+                        if not source_col:
+                            return ""
+                        return clean_text(raw_row.get(source_col, ""))
+
+                    owner_full_name = mapped("owner_full_name")
+                    owner_first_name = mapped("owner_first_name")
+                    owner_last_name = mapped("owner_last_name")
+                    owner_email = mapped("owner_email")
+                    owner_phone = normalize_phone(mapped("owner_phone"))
+                    owner_mailing_address = mapped("owner_mailing_address")
+                    owner_nationality = mapped("owner_nationality")
+                    property_city = mapped("property_city")
+                    property_district = mapped("property_district")
+                    property_master_community = mapped("property_master_community")
+                    property_community = mapped("property_community")
+                    property_building_name = mapped("property_building_name")
+                    property_villa_name = mapped("property_villa_name")
+                    property_unit_number = mapped("property_unit_number")
+                    property_type = mapped("property_type")
+                    property_developer_name = mapped("property_developer_name")
+                    property_plot_number = mapped("property_plot_number")
+                    property_p_number = mapped("property_p_number")
+                    property_municipality_number = mapped("property_municipality_number")
+                    transaction_type = mapped("transaction_type")
+                    transaction_date = parse_date_or_none(mapped("transaction_date"))
+                    transaction_price_raw = mapped("transaction_price")
+                    transaction_currency = mapped("transaction_currency") or "AED"
+                    transaction_notes = mapped("transaction_notes")
+
+                    if not any(
+                        [
+                            owner_full_name,
+                            owner_email,
+                            owner_phone,
+                            property_unit_number,
+                            property_building_name,
+                            property_villa_name,
+                            property_community,
+                            property_master_community,
+                            property_district,
+                            property_city,
+                            property_plot_number,
+                            property_p_number,
+                            property_municipality_number,
+                        ]
+                    ):
+
+                        continue
+
+                    owner_id = upsert_owner(
+                        cur,
+                        user["tenant_id"],
+                        owner_full_name,
+                        owner_first_name,
+                        owner_last_name,
+                        owner_email,
+                        owner_phone,
+                        owner_mailing_address,
+                        owner_nationality,
+                        raw_row,
+                    )
+
+                    property_id = upsert_property(
+                        cur,
+                        user["tenant_id"],
+                        property_city,
+                        property_district,
+                        property_master_community,
+                        property_community,
+                        property_building_name,
+                        property_villa_name,
+                        property_type,
+                        property_unit_number,
+                        property_developer_name,
+                        property_plot_number,
+                        property_p_number,
+                        property_municipality_number,
+                        raw_row,
+                    )
+
+                    if property_id and owner_id:
+                        cur.execute(
+                            """
+                            SELECT id
+                            FROM property_owner_links
+                            WHERE tenant_id = %s AND property_id = %s AND owner_id = %s
+                            LIMIT 1
+                            """,
+                            (user["tenant_id"], property_id, owner_id),
+                        )
+                        existing_link = cur.fetchone()
+
+                        if not existing_link:
+                            cur.execute(
+                                """
+                                INSERT INTO property_owner_links (
+                                    tenant_id,
+                                    property_id,
+                                    owner_id,
+                                    ownership_type,
+                                    is_primary_owner,
+                                    match_confidence,
+                                    source_upload_id
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    user["tenant_id"],
+                                    property_id,
+                                    owner_id,
+                                    "owner",
+                                    True,
+                                    100.00 if (owner_email or owner_phone) else 70.00,
+                                    uploaded_file_id,
+                                ),
+                            )
+                            owners_linked += 1
+
+                    transaction_price = None
+                    if transaction_price_raw:
+                        cleaned_price = re.sub(r"[^0-9.]", "", transaction_price_raw)
+                        if cleaned_price:
+                            try:
+                                transaction_price = float(cleaned_price)
+                            except ValueError:
+                                transaction_price = None
+
+                    if property_id and (
+                        transaction_type or transaction_date or transaction_price is not None or transaction_notes
+                    ):
+                        cur.execute(
+                            """
+                            SELECT id
+                            FROM property_transactions
+                            WHERE tenant_id = %s
+                              AND property_id = %s
+                              AND COALESCE(owner_id::text, '') = COALESCE(%s::text, '')
+                              AND COALESCE(transaction_type, '') = %s
+                              AND transaction_date IS NOT DISTINCT FROM %s
+                              AND price IS NOT DISTINCT FROM %s
+                              AND COALESCE(currency, '') = %s
+                              AND COALESCE(notes, '') = %s
+                            LIMIT 1
+                            """,
+                            (
+                                user["tenant_id"],
+                                property_id,
+                                owner_id,
+                                transaction_type or "",
+                                transaction_date,
+                                transaction_price,
+                                transaction_currency or "",
+                                transaction_notes or "",
+                            ),
+                        )
+                        existing_transaction = cur.fetchone()
+
+                        if not existing_transaction:
+                            cur.execute(
+                                """
+                                INSERT INTO property_transactions (
+                                    tenant_id,
+                                    property_id,
+                                    owner_id,
+                                    transaction_type,
+                                    transaction_date,
+                                    price,
+                                    currency,
+                                    notes,
+                                    source_upload_id,
+                                    raw_data
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    user["tenant_id"],
+                                    property_id,
+                                    owner_id,
+                                    transaction_type,
+                                    transaction_date,
+                                    transaction_price,
+                                    transaction_currency,
+                                    transaction_notes,
+                                    uploaded_file_id,
+                                    json.dumps(raw_row),
+                                ),
+                            )
+                            transactions_created += 1
+
+                    if owner_id or property_id:
+                        records_created += 1
+
+            cur.execute(
+                """
+                UPDATE uploaded_files
+                SET status = %s
+                WHERE id = %s
+                """,
+                ("imported", uploaded_file_id),
+            )
+
+        conn.commit()
+
+    return {
+        "message": "Import finalized successfully",
+        "uploaded_file_id": uploaded_file_id,
+        "records_processed": records_created,
+        "owners_linked": owners_linked,
+        "transactions_created": transactions_created,
+        "sheet_count": len(payload.sheets),
+        "uploaded_by": user["email"],
+    }
+
+
+
+@app.get("/owners")
+def list_owners(
+    authorization: str | None = Header(default=None),
+    q: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    user = get_current_user_from_auth(authorization)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    sql = """
+        SELECT
+            id,
+            full_name,
+            first_name,
+            last_name,
+            email,
+            phone,
+            mailing_address,
+            nationality,
+            whatsapp_active,
+            linkedin_url,
+            facebook_url,
+            instagram_url,
+            snapchat_url,
+            profile_image_url,
+            raw_data,
+            created_at,
+            updated_at
+        FROM owners
+        WHERE tenant_id = %s
+    """
+    params = [user["tenant_id"]]
+
+    q = clean_text(q)
+    if q:
+        sql += """
+            AND (
+                coalesce(full_name, '') ILIKE %s
+                OR coalesce(email, '') ILIKE %s
+                OR coalesce(phone, '') ILIKE %s
+                OR coalesce(nationality, '') ILIKE %s
+            )
+        """
+        like_q = f"%{q}%"
+        params.extend([like_q, like_q, like_q, like_q])
+
+    sql += " ORDER BY updated_at DESC, created_at DESC LIMIT %s"
+    params.append(limit)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        (
+            owner_id,
+            full_name,
+            first_name,
+            last_name,
+            email,
+            phone,
+            mailing_address,
+            nationality,
+            whatsapp_active,
+            linkedin_url,
+            facebook_url,
+            instagram_url,
+            snapchat_url,
+            profile_image_url,
+            raw_data,
+            created_at,
+            updated_at,
+        ) = row
+
+        results.append(
+            {
+                "id": str(owner_id),
+                "full_name": full_name,
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+                "phone": phone,
+                "mailing_address": mailing_address,
+                "nationality": nationality,
+                "whatsapp_active": whatsapp_active,
+                "linkedin_url": linkedin_url,
+                "facebook_url": facebook_url,
+                "instagram_url": instagram_url,
+                "snapchat_url": snapchat_url,
+                "profile_image_url": profile_image_url,
+                "raw_data": raw_data,
+                "created_at": created_at.isoformat() if created_at else None,
+                "updated_at": updated_at.isoformat() if updated_at else None,
+            }
+        )
+
+    return {
+        "count": len(results),
+        "results": results,
+    }
+
+
+@app.get("/properties")
+def list_properties(
+    authorization: str | None = Header(default=None),
+    q: str = Query(default=""),
+    city: str = Query(default=""),
+    district: str = Query(default=""),
+    master_community: str = Query(default=""),
+    community: str = Query(default=""),
+    building_name: str = Query(default=""),
+    unit_number: str = Query(default=""),
+    property_type: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    user = get_current_user_from_auth(authorization)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    sql = """
+        SELECT
+            id,
+            city,
+            district,
+            master_community,
+            community,
+            building_name,
+            villa_name,
+            property_type,
+            unit_number,
+            developer_name,
+            plot_number,
+            p_number,
+            municipality_number,
+            raw_data,
+            created_at,
+            updated_at
+        FROM properties
+        WHERE tenant_id = %s
+    """
+    params = [user["tenant_id"]]
+
+    def add_filter(field_name: str, value: str):
+        nonlocal sql, params
+        value = clean_text(value)
+        if value:
+            sql += f" AND coalesce({field_name}, '') ILIKE %s"
+            params.append(f"%{value}%")
+
+    q = clean_text(q)
+    if q:
+        sql += """
+            AND (
+                coalesce(city, '') ILIKE %s
+                OR coalesce(district, '') ILIKE %s
+                OR coalesce(master_community, '') ILIKE %s
+                OR coalesce(community, '') ILIKE %s
+                OR coalesce(building_name, '') ILIKE %s
+                OR coalesce(villa_name, '') ILIKE %s
+                OR coalesce(unit_number, '') ILIKE %s
+                OR coalesce(property_type, '') ILIKE %s
+                OR coalesce(plot_number, '') ILIKE %s
+                OR coalesce(p_number, '') ILIKE %s
+                OR coalesce(municipality_number, '') ILIKE %s
+            )
+        """
+        like_q = f"%{q}%"
+        params.extend([like_q] * 11)
+
+    add_filter("city", city)
+    add_filter("district", district)
+    add_filter("master_community", master_community)
+    add_filter("community", community)
+    add_filter("building_name", building_name)
+    add_filter("unit_number", unit_number)
+    add_filter("property_type", property_type)
+
+    sql += " ORDER BY updated_at DESC, created_at DESC LIMIT %s"
+    params.append(limit)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        (
+            property_id,
+            city_val,
+            district_val,
+            master_community_val,
+            community_val,
+            building_name_val,
+            villa_name_val,
+            property_type_val,
+            unit_number_val,
+            developer_name_val,
+            plot_number_val,
+            p_number_val,
+            municipality_number_val,
+            raw_data_val,
+            created_at_val,
+            updated_at_val,
+        ) = row
+
+        results.append(
+            {
+                "id": str(property_id),
+                "city": city_val,
+                "district": district_val,
+                "master_community": master_community_val,
+                "community": community_val,
+                "building_name": building_name_val,
+                "villa_name": villa_name_val,
+                "property_type": property_type_val,
+                "unit_number": unit_number_val,
+                "developer_name": developer_name_val,
+                "plot_number": plot_number_val,
+                "p_number": p_number_val,
+                "municipality_number": municipality_number_val,
+                "raw_data": raw_data_val,
+                "created_at": created_at_val.isoformat() if created_at_val else None,
+                "updated_at": updated_at_val.isoformat() if updated_at_val else None,
+            }
+        )
+
+    return {
+        "count": len(results),
+        "results": results,
+    }
+
+
+@app.get("/transactions")
+def list_transactions(
+    authorization: str | None = Header(default=None),
+    q: str = Query(default=""),
+    transaction_type: str = Query(default=""),
+    currency: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    user = get_current_user_from_auth(authorization)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    sql = """
+        SELECT
+            pt.id,
+            pt.property_id,
+            pt.owner_id,
+            pt.transaction_type,
+            pt.transaction_date,
+            pt.price,
+            pt.currency,
+            pt.notes,
+            pt.source_upload_id,
+            pt.raw_data,
+            pt.created_at
+        FROM property_transactions pt
+        LEFT JOIN properties p ON p.id = pt.property_id
+        LEFT JOIN owners o ON o.id = pt.owner_id
+        WHERE pt.tenant_id = %s
+    """
+    params = [user["tenant_id"]]
+
+    q = clean_text(q)
+    if q:
+        sql += """
+            AND (
+                COALESCE(pt.transaction_type, '') ILIKE %s
+                OR COALESCE(pt.currency, '') ILIKE %s
+                OR COALESCE(pt.notes, '') ILIKE %s
+                OR COALESCE(p.city, '') ILIKE %s
+                OR COALESCE(p.district, '') ILIKE %s
+                OR COALESCE(p.master_community, '') ILIKE %s
+                OR COALESCE(p.community, '') ILIKE %s
+                OR COALESCE(p.building_name, '') ILIKE %s
+                OR COALESCE(p.villa_name, '') ILIKE %s
+                OR COALESCE(p.unit_number, '') ILIKE %s
+                OR COALESCE(p.plot_number, '') ILIKE %s
+                OR COALESCE(p.p_number, '') ILIKE %s
+                OR COALESCE(p.municipality_number, '') ILIKE %s
+                OR COALESCE(o.full_name, '') ILIKE %s
+                OR COALESCE(o.phone, '') ILIKE %s
+                OR COALESCE(o.nationality, '') ILIKE %s
+            )
+        """
+        like_q = f"%{q}%"
+        params.extend([like_q] * 16)
+
+    transaction_type = clean_text(transaction_type)
+    if transaction_type:
+        sql += " AND COALESCE(pt.transaction_type, '') ILIKE %s"
+        params.append(f"%{transaction_type}%")
+
+    currency = clean_text(currency)
+    if currency:
+        sql += " AND COALESCE(pt.currency, '') ILIKE %s"
+        params.append(f"%{currency}%")
+
+    sql += " ORDER BY pt.transaction_date DESC NULLS LAST, pt.created_at DESC LIMIT %s"
+    params.append(limit)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        (
+            transaction_id,
+            property_id,
+            owner_id,
+            transaction_type_val,
+            transaction_date_val,
+            price_val,
+            currency_val,
+            notes_val,
+            source_upload_id,
+            raw_data_val,
+            created_at_val,
+        ) = row
+
+        results.append(
+            {
+                "id": str(transaction_id),
+                "property_id": str(property_id) if property_id else None,
+                "owner_id": str(owner_id) if owner_id else None,
+                "transaction_type": transaction_type_val,
+                "transaction_date": transaction_date_val.isoformat() if transaction_date_val else None,
+                "price": float(price_val) if price_val is not None else None,
+                "currency": currency_val,
+                "notes": notes_val,
+                "source_upload_id": str(source_upload_id) if source_upload_id else None,
+                "raw_data": raw_data_val,
+                "created_at": created_at_val.isoformat() if created_at_val else None,
+            }
+        )
+
+    return {"count": len(results), "results": results}
+
+
+
 
 
 @app.post("/import-upload")
@@ -702,47 +2278,48 @@ def search_properties(
 
     sql = """
         SELECT
-            id,
-            owner_name,
-            owner_name_ar,
-            email,
-            phone,
-            district,
-            master_community,
-            project_name,
-            sub_community,
-            property_type,
-            bedroom_count,
-            unit_number,
-            building_name,
-            plot_number,
-            developer_name,
-            source_sheet,
-            raw_data,
-            created_at
-        FROM property_records
-        WHERE tenant_id = %s
+            pol.id,
+            o.full_name AS owner_name,
+            '' AS owner_name_ar,
+            o.email,
+            o.phone,
+            coalesce(p.district, '') AS district,
+            coalesce(p.master_community, '') AS master_community,
+            coalesce(p.community, '') AS project_name,
+            coalesce(p.community, '') AS sub_community,
+            coalesce(p.property_type, '') AS property_type,
+            '' AS bedroom_count,
+            coalesce(p.unit_number, '') AS unit_number,
+            coalesce(p.building_name, '') AS building_name,
+            coalesce(p.plot_number, '') AS plot_number,
+            coalesce(p.developer_name, '') AS developer_name,
+            '' AS source_sheet,
+            coalesce(o.raw_data, '{}'::jsonb) AS raw_data,
+            pol.created_at
+        FROM property_owner_links pol
+        JOIN owners o ON o.id = pol.owner_id
+        JOIN properties p ON p.id = pol.property_id
+        WHERE pol.tenant_id = %s
     """
     params = [user["tenant_id"]]
 
-    def add_filter(field_name: str, value: str):
+    def add_filter(expr: str, value: str):
         nonlocal sql, params
         value = clean_text(value)
         if value:
-            sql += f" AND {field_name} ILIKE %s"
+            sql += f" AND {expr} ILIKE %s"
             params.append(f"%{value}%")
 
-    add_filter("owner_name", owner_name)
-    add_filter("email", email)
-    add_filter("phone", phone)
-    add_filter("district", district)
-    add_filter("master_community", master_community)
-    add_filter("project_name", project_name)
-    add_filter("sub_community", sub_community)
-    add_filter("bedroom_count", bedroom_count)
-    add_filter("unit_number", unit_number)
+    add_filter("coalesce(o.full_name, '')", owner_name)
+    add_filter("coalesce(o.email, '')", email)
+    add_filter("coalesce(o.phone, '')", phone)
+    add_filter("coalesce(p.district, '')", district)
+    add_filter("coalesce(p.master_community, '')", master_community)
+    add_filter("coalesce(p.community, '')", project_name)
+    add_filter("coalesce(p.community, '')", sub_community)
+    add_filter("coalesce(p.unit_number, '')", unit_number)
 
-    sql += " ORDER BY created_at DESC LIMIT %s"
+    sql += " ORDER BY pol.created_at DESC LIMIT %s"
     params.append(limit)
 
     with psycopg.connect(DATABASE_URL) as conn:
