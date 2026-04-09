@@ -2832,3 +2832,88 @@ def parse_ai_search_query(q: str) -> dict:
 
     return filters
 
+
+
+def parse_ai_search_query(q: str) -> dict:
+    text = clean_text(q).lower()
+    filters = {
+        "owner_name": "",
+        "email": "",
+        "phone": "",
+        "district": "",
+        "master_community": "",
+        "project_name": "",
+        "sub_community": "",
+        "bedroom_count": "",
+        "unit_number": "",
+        "property_type": "",
+        "limit": 50,
+        "offset": 0,
+    }
+
+    if not text:
+        return filters
+
+    phone_match = re.search(r'(\+?\d[\d\-\|\s]{7,}\d)', text)
+    if phone_match:
+        filters["phone"] = re.sub(r"[^0-9+]", "", phone_match.group(1))
+
+    unit_match = re.search(r'\bunit\s+([a-z0-9\-/]+)', text)
+    if unit_match:
+        filters["unit_number"] = unit_match.group(1).strip()
+
+    if not filters["unit_number"]:
+        direct_unit = re.search(r'\b\d{3,}[a-z]?\-+\b', text)
+        if direct_unit:
+            filters["unit_number"] = direct_unit.group(0).strip()
+
+    owner_match = re.search(r'owned by\s+(.+?)(?:\s+in\s+|\s+at\s+|\s*$)', text)
+    if owner_match:
+        filters["owner_name"] = owner_match.group(1).strip(" ,.-")
+    elif "lara" in text:
+        filters["owner_name"] = "lara"
+
+    if "palma" in text:
+        filters["project_name"] = "palma"
+        filters["sub_community"] = "palma"
+    elif "arabian ranches" in text:
+        filters["project_name"] = "arabian ranches"
+        filters["sub_community"] = "arabian ranches"
+
+    if "villa" in text:
+        filters["property_type"] = "Villa"
+    elif "commercial" in text:
+        filters["property_type"] = "Commercial"
+    elif "residential" in text:
+        filters["property_type"] = "Residential"
+
+    return filters
+
+
+@app.get("/search-ai")
+def search_ai(
+    authorization: str | None = Header(default=None),
+    q: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    parsed = parse_ai_search_query(q)
+    parsed["limit"] = limit
+    parsed["offset"] = offset
+
+    return search_properties(
+        authorization=authorization,
+        owner_name=parsed.get("owner_name", ""),
+        email=parsed.get("email", ""),
+        phone=parsed.get("phone", ""),
+        district=parsed.get("district", ""),
+        master_community=parsed.get("master_community", ""),
+        project_name=parsed.get("project_name", ""),
+        sub_community=parsed.get("sub_community", ""),
+        bedroom_count=parsed.get("bedroom_count", ""),
+        unit_number=parsed.get("unit_number", ""),
+        property_type=parsed.get("property_type", ""),
+        limit=parsed.get("limit", 50),
+        offset=parsed.get("offset", 0),
+    )
+
