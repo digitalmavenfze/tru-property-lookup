@@ -2258,6 +2258,239 @@ def import_upload(
     }
 
 
+
+
+def parse_nl_search_query(q: str) -> dict:
+    q_clean = clean_text(q)
+    q_lower = q_clean.lower()
+
+    filters = {
+        "owner_name": "",
+        "phone": "",
+        "unit_number": "",
+        "master_community": "",
+        "project_name": "",
+        "property_type": "",
+        "district": "",
+        "limit": 20,
+    }
+
+    phone_match = re.search(r'(?<!\d)(\+?\d[\d\-\s]{7,}\d)', q_clean)
+    if phone_match:
+        filters["phone"] = re.sub(r"[^0-9+]", "", phone_match.group(1))
+
+    unit_match = re.search(r'\bunit\s*[:#-]?\s*([a-zA-Z0-9\-\/]+)', q_clean, flags=re.I)
+    if unit_match:
+        filters["unit_number"] = clean_text(unit_match.group(1))
+
+    owned_by_match = re.search(r'(?:owned by|owner is|by)\s+([a-zA-Z][a-zA-Z\s\.\'-]{2,})', q_clean, flags=re.I)
+    if owned_by_match:
+        filters["owner_name"] = clean_text(owned_by_match.group(1))
+
+    in_match = re.search(r'(?:in|at)\s+([a-zA-Z0-9\s\-\&]+)', q_clean, flags=re.I)
+    if in_match:
+        place = clean_text(in_match.group(1))
+        if place and not filters["project_name"]:
+            filters["project_name"] = place
+
+    property_keywords = {
+        "villa": "Villa",
+        "villas": "Villa",
+        "apartment": "Apartment",
+        "apartments": "Apartment",
+        "flat": "Apartment",
+        "flats": "Apartment",
+        "commercial": "Commercial",
+        "office": "Office",
+        "offices": "Office",
+        "building": "Building",
+        "residential": "Residential",
+        "plot": "Plot",
+    }
+
+    for k, v in property_keywords.items():
+        if re.search(rf'\b{re.escape(k)}\b', q_lower):
+            filters["property_type"] = v
+            break
+
+    known_projects = [
+        "ARABIAN RANCHES - PALMA COMMUNITY",
+        "Arabian Ranches III - JOY",
+        "Arabian Ranches III - SUN",
+        "Arabian Ranches lll - Caya",
+        "Arabian Ranches lll",
+        "558 Villa",
+        "Wadi Al Safa 5",
+        "Wadi Al Safa 7",
+    ]
+
+    for proj in known_projects:
+        if proj.lower() in q_lower:
+            if proj.lower().startswith("wadi al safa"):
+                filters["district"] = proj
+            elif proj == "558 Villa":
+                filters["master_community"] = proj
+            else:
+                filters["project_name"] = proj
+
+    if not filters["owner_name"]:
+        m = re.search(r'\b(lara|ahmed|hafiz|delaram|lijesh|abdul rahim|sundoo)\b', q_lower)
+        if m:
+            filters["owner_name"] = clean_text(m.group(1))
+
+    return filters
+
+
+@app.get("/search-ai")
+def search_ai(
+    authorization: str | None = Header(default=None),
+    q: str = Query(default=""),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    user = get_current_user_from_auth(authorization)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    parsed = parse_nl_search_query(q)
+    parsed["limit"] = limit
+
+    sql = """
+        SELECT
+            pol.id,
+            o.id AS owner_id,
+            o.full_name AS owner_name,
+            '' AS owner_name_ar,
+            o.email,
+            o.phone,
+            coalesce(p.district, '') AS district,
+            coalesce(p.master_community, '') AS master_community,
+            coalesce(p.community, '') AS project_name,
+            coalesce(p.community, '') AS sub_community,
+            coalesce(p.property_type, '') AS property_type,
+            '' AS bedroom_count,
+            coalesce(p.unit_number, '') AS unit_number,
+            coalesce(p.building_name, '') AS building_name,
+            coalesce(p.plot_number, '') AS plot_number,
+            coalesce(p.developer_name, '') AS developer_name,
+            '' AS source_sheet,
+            coalesce(o.raw_data, '{}'::jsonb) AS raw_data,
+            pol.created_at,
+            (
+                CASE WHEN %s <> '' AND o.full_name ILIKE %s THEN 100 ELSE 0 END +
+                CASE WHEN %s <> '' AND o.phone ILIKE %s THEN 90 ELSE 0 END +
+                CASE WHEN %s <> '' AND coalesce(p.unit_number, '') ILIKE %s THEN 85 ELSE 0 END +
+                CASE WHEN %s <> '' AND coalesce(p.community, '') ILIKE %s THEN 70 ELSE 0 END +
+                CASE WHEN %s <> '' AND coalesce(p.master_community, '') ILIKE %s THEN 65 ELSE 0 END +
+                CASE WHEN %s <> '' AND coalesce(p.property_type, '') ILIKE %s THEN 60 ELSE 0 END +
+                CASE WHEN %s <> '' AND coalesce(p.district, '') ILIKE %s THEN 50 ELSE 0 END
+            ) AS rank_score
+        FROM property_owner_links pol
+        JOIN owners o ON o.id = pol.owner_id
+        JOIN properties p ON p.id = pol.property_id
+        WHERE pol.tenant_id = %s
+    """
+
+    params = [
+        parsed["owner_name"], f'%{parsed["owner_name"]}%',
+        parsed["phone"], f'%{parsed["phone"]}%',
+        parsed["unit_number"], f'%{parsed["unit_number"]}%',
+        parsed["project_name"], f'%{parsed["project_name"]}%',
+        parsed["master_community"], f'%{parsed["master_community"]}%',
+        parsed["property_type"], f'%{parsed["property_type"]}%',
+        parsed["district"], f'%{parsed["district"]}%',
+        user["tenant_id"],
+    ]
+
+    def add_filter(expr: str, value: str):
+        nonlocal sql, params
+        value = clean_text(value)
+        if value:
+            sql += f" AND {expr} ILIKE %s"
+            params.append(f"%{value}%")
+
+    add_filter("o.full_name", parsed["owner_name"])
+    add_filter("o.phone", parsed["phone"])
+    add_filter("coalesce(p.unit_number, '')", parsed["unit_number"])
+    add_filter("coalesce(p.master_community, '')", parsed["master_community"])
+    add_filter("coalesce(p.community, '')", parsed["project_name"])
+    add_filter("coalesce(p.property_type, '')", parsed["property_type"])
+    add_filter("coalesce(p.district, '')", parsed["district"])
+
+    count_sql = f"SELECT count(*) FROM ({sql}) t"
+
+    sql += " ORDER BY rank_score DESC, pol.created_at DESC LIMIT %s OFFSET %s"
+    params.extend([limit, offset])
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params[:-2])
+            total = cur.fetchone()[0]
+
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        (
+            link_id,
+            owner_id,
+            owner_name_val,
+            owner_name_ar_val,
+            email_val,
+            phone_val,
+            district_val,
+            master_community_val,
+            project_name_val,
+            sub_community_val,
+            property_type_val,
+            bedroom_count_val,
+            unit_number_val,
+            building_name_val,
+            plot_number_val,
+            developer_name_val,
+            source_sheet_val,
+            raw_data_val,
+            created_at_val,
+            rank_score_val,
+        ) = row
+
+        results.append(
+            {
+                "id": str(link_id),
+                "owner_id": str(owner_id),
+                "owner_name": owner_name_val,
+                "owner_name_ar": owner_name_ar_val,
+                "email": email_val,
+                "phone": phone_val,
+                "district": district_val,
+                "master_community": master_community_val,
+                "project_name": project_name_val,
+                "sub_community": sub_community_val,
+                "property_type": property_type_val,
+                "bedroom_count": bedroom_count_val,
+                "unit_number": unit_number_val,
+                "building_name": building_name_val,
+                "plot_number": plot_number_val,
+                "developer_name": developer_name_val,
+                "source_sheet": source_sheet_val,
+                "raw_data": raw_data_val,
+                "created_at": created_at_val.isoformat() if created_at_val else None,
+                "rank_score": float(rank_score_val or 0),
+            }
+        )
+
+    return {
+        "query": q,
+        "parsed_filters": parsed,
+        "count": len(results),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "results": results,
+    }
+
 @app.get("/search")
 def search_properties(
     authorization: str | None = Header(default=None),
