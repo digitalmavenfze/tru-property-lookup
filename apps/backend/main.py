@@ -2290,7 +2290,8 @@ def search_properties(
 
     sql = """
         SELECT
-            pol.id,
+            o.id AS owner_id,
+            pol.id AS link_id,
             o.full_name AS owner_name,
             '' AS owner_name_ar,
             o.email,
@@ -2399,6 +2400,7 @@ def search_properties(
     results = []
     for row in rows:
         (
+            owner_id_val,
             record_id,
             owner_name_val,
             owner_name_ar_val,
@@ -2422,7 +2424,9 @@ def search_properties(
 
         results.append(
             {
-                "id": str(record_id),
+                "id": str(owner_id_val),
+                "owner_id": str(owner_id_val),
+                "link_id": str(record_id),
                 "owner_name": owner_name_val,
                 "owner_name_ar": owner_name_ar_val,
                 "email": email_val,
