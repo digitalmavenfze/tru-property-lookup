@@ -128,7 +128,7 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [clean_text(col) if clean_text(col) else f"column_{i + 1}" for i, col in enumerate(df.columns)]
     df = df.fillna("")
-    return df.applymap(clean_text)
+    return df.map(clean_text)
 
 
 def normalize_phone(value: str) -> str:
