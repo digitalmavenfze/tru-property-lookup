@@ -4,6 +4,7 @@ import re
 import json
 import secrets
 import hashlib
+from typing import Any
 from io import BytesIO
 
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Query
@@ -2270,11 +2271,22 @@ def search_properties(
     bedroom_count: str = Query(default=""),
     unit_number: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ):
     user = get_current_user_from_auth(authorization)
 
     if not DATABASE_URL:
         raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    owner_name_clean = clean_text(owner_name)
+    email_clean = clean_text(email)
+    phone_clean = clean_text(phone)
+    district_clean = clean_text(district)
+    master_community_clean = clean_text(master_community)
+    project_name_clean = clean_text(project_name)
+    sub_community_clean = clean_text(sub_community)
+    bedroom_count_clean = clean_text(bedroom_count)
+    unit_number_clean = clean_text(unit_number)
 
     sql = """
         SELECT
@@ -2295,35 +2307,92 @@ def search_properties(
             coalesce(p.developer_name, '') AS developer_name,
             '' AS source_sheet,
             coalesce(o.raw_data, '{}'::jsonb) AS raw_data,
-            pol.created_at
+            pol.created_at,
+            CASE
+                WHEN %s <> '' THEN GREATEST(
+                    similarity(coalesce(o.full_name, ''), %s),
+                    similarity(coalesce(p.unit_number, ''), %s),
+                    similarity(coalesce(p.community, ''), %s),
+                    similarity(coalesce(p.master_community, ''), %s),
+                    similarity(coalesce(o.phone, ''), %s)
+                )
+                ELSE 0
+            END AS rank_score
         FROM property_owner_links pol
         JOIN owners o ON o.id = pol.owner_id
         JOIN properties p ON p.id = pol.property_id
         WHERE pol.tenant_id = %s
     """
-    params = [user["tenant_id"]]
+    params = [
+        owner_name_clean,
+        owner_name_clean,
+        owner_name_clean,
+        owner_name_clean,
+        owner_name_clean,
+        owner_name_clean,
+        user["tenant_id"],
+    ]
 
     def add_filter(expr: str, value: str):
         nonlocal sql, params
-        value = clean_text(value)
         if value:
             sql += f" AND {expr} ILIKE %s"
             params.append(f"%{value}%")
 
-    add_filter("coalesce(o.full_name, '')", owner_name)
-    add_filter("coalesce(o.email, '')", email)
-    add_filter("coalesce(o.phone, '')", phone)
-    add_filter("coalesce(p.district, '')", district)
-    add_filter("coalesce(p.master_community, '')", master_community)
-    add_filter("coalesce(p.community, '')", project_name)
-    add_filter("coalesce(p.community, '')", sub_community)
-    add_filter("coalesce(p.unit_number, '')", unit_number)
+    add_filter("coalesce(o.full_name, '')", owner_name_clean)
+    add_filter("coalesce(o.email, '')", email_clean)
+    add_filter("coalesce(o.phone, '')", phone_clean)
+    add_filter("coalesce(p.district, '')", district_clean)
+    add_filter("coalesce(p.master_community, '')", master_community_clean)
+    add_filter("coalesce(p.community, '')", project_name_clean)
+    add_filter("coalesce(p.community, '')", sub_community_clean)
+    add_filter("coalesce(p.unit_number, '')", unit_number_clean)
 
-    sql += " ORDER BY pol.created_at DESC LIMIT %s"
-    params.append(limit)
+    if bedroom_count_clean:
+        add_filter("coalesce(o.raw_data->>'ROOMS DESCRIPTION', '')", bedroom_count_clean)
+
+    sql += """
+        ORDER BY
+            rank_score DESC,
+            pol.created_at DESC,
+            o.updated_at DESC NULLS LAST,
+            o.created_at DESC NULLS LAST
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+
+    count_sql = """
+        SELECT count(*)
+        FROM property_owner_links pol
+        JOIN owners o ON o.id = pol.owner_id
+        JOIN properties p ON p.id = pol.property_id
+        WHERE pol.tenant_id = %s
+    """
+    count_params = [user["tenant_id"]]
+
+    def add_count_filter(expr: str, value: str):
+        nonlocal count_sql, count_params
+        if value:
+            count_sql += f" AND {expr} ILIKE %s"
+            count_params.append(f"%{value}%")
+
+    add_count_filter("coalesce(o.full_name, '')", owner_name_clean)
+    add_count_filter("coalesce(o.email, '')", email_clean)
+    add_count_filter("coalesce(o.phone, '')", phone_clean)
+    add_count_filter("coalesce(p.district, '')", district_clean)
+    add_count_filter("coalesce(p.master_community, '')", master_community_clean)
+    add_count_filter("coalesce(p.community, '')", project_name_clean)
+    add_count_filter("coalesce(p.community, '')", sub_community_clean)
+    add_count_filter("coalesce(p.unit_number, '')", unit_number_clean)
+
+    if bedroom_count_clean:
+        add_count_filter("coalesce(o.raw_data->>'ROOMS DESCRIPTION', '')", bedroom_count_clean)
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            cur.execute(count_sql, count_params)
+            total_count = cur.fetchone()[0]
+
             cur.execute(sql, params)
             rows = cur.fetchall()
 
@@ -2348,6 +2417,7 @@ def search_properties(
             source_sheet_val,
             raw_data_val,
             created_at_val,
+            rank_score_val,
         ) = row
 
         results.append(
@@ -2370,10 +2440,181 @@ def search_properties(
                 "source_sheet": source_sheet_val,
                 "raw_data": raw_data_val,
                 "created_at": created_at_val.isoformat() if created_at_val else None,
+                "rank_score": float(rank_score_val or 0),
             }
         )
 
     return {
         "count": len(results),
+        "total": total_count,
+        "limit": limit,
+        "offset": offset,
         "results": results,
+    }
+
+
+@app.get("/owners/{owner_id}")
+def get_owner_detail(
+    owner_id: str,
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    full_name,
+                    first_name,
+                    last_name,
+                    email,
+                    phone,
+                    mailing_address,
+                    nationality,
+                    whatsapp_active,
+                    linkedin_url,
+                    facebook_url,
+                    instagram_url,
+                    snapchat_url,
+                    profile_image_url,
+                    raw_data,
+                    created_at,
+                    updated_at
+                FROM owners
+                WHERE tenant_id = %s AND id = %s
+                LIMIT 1
+                """,
+                (user["tenant_id"], owner_id),
+            )
+            owner_row = cur.fetchone()
+
+            if not owner_row:
+                raise HTTPException(status_code=404, detail="Owner not found")
+
+            cur.execute(
+                """
+                SELECT
+                    pol.id,
+                    p.id,
+                    p.city,
+                    p.district,
+                    p.master_community,
+                    p.community,
+                    p.building_name,
+                    p.villa_name,
+                    p.unit_number,
+                    p.property_type,
+                    p.developer_name,
+                    p.plot_number,
+                    p.p_number,
+                    p.municipality_number,
+                    p.raw_data,
+                    pol.ownership_type,
+                    pol.is_primary_owner,
+                    pol.match_confidence,
+                    pol.created_at
+                FROM property_owner_links pol
+                JOIN properties p ON p.id = pol.property_id
+                WHERE pol.tenant_id = %s AND pol.owner_id = %s
+                ORDER BY pol.created_at DESC, p.updated_at DESC NULLS LAST, p.created_at DESC NULLS LAST
+                """,
+                (user["tenant_id"], owner_id),
+            )
+            property_rows = cur.fetchall()
+
+    (
+        owner_id_val,
+        full_name,
+        first_name,
+        last_name,
+        email,
+        phone,
+        mailing_address,
+        nationality,
+        whatsapp_active,
+        linkedin_url,
+        facebook_url,
+        instagram_url,
+        snapchat_url,
+        profile_image_url,
+        raw_data,
+        created_at,
+        updated_at,
+    ) = owner_row
+
+    properties = []
+    for row in property_rows:
+        (
+            link_id,
+            property_id,
+            city,
+            district,
+            master_community,
+            community,
+            building_name,
+            villa_name,
+            unit_number,
+            property_type,
+            developer_name,
+            plot_number,
+            p_number,
+            municipality_number,
+            property_raw_data,
+            ownership_type,
+            is_primary_owner,
+            match_confidence,
+            link_created_at,
+        ) = row
+
+        properties.append(
+            {
+                "link_id": str(link_id),
+                "property_id": str(property_id),
+                "city": city,
+                "district": district,
+                "master_community": master_community,
+                "community": community,
+                "building_name": building_name,
+                "villa_name": villa_name,
+                "unit_number": unit_number,
+                "property_type": property_type,
+                "developer_name": developer_name,
+                "plot_number": plot_number,
+                "p_number": p_number,
+                "municipality_number": municipality_number,
+                "raw_data": property_raw_data,
+                "ownership_type": ownership_type,
+                "is_primary_owner": is_primary_owner,
+                "match_confidence": float(match_confidence) if match_confidence is not None else None,
+                "linked_at": link_created_at.isoformat() if link_created_at else None,
+            }
+        )
+
+    return {
+        "owner": {
+            "id": str(owner_id_val),
+            "full_name": full_name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email,
+            "phone": phone,
+            "mailing_address": mailing_address,
+            "nationality": nationality,
+            "whatsapp_active": whatsapp_active,
+            "linkedin_url": linkedin_url,
+            "facebook_url": facebook_url,
+            "instagram_url": instagram_url,
+            "snapchat_url": snapchat_url,
+            "profile_image_url": profile_image_url,
+            "raw_data": raw_data,
+            "created_at": created_at.isoformat() if created_at else None,
+            "updated_at": updated_at.isoformat() if updated_at else None,
+        },
+        "properties_count": len(properties),
+        "properties": properties,
     }
