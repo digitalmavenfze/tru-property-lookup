@@ -2382,6 +2382,7 @@ def search_properties(
     sub_community: str = Query(default=""),
     bedroom_count: str = Query(default=""),
     unit_number: str = Query(default=""),
+    property_type: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
