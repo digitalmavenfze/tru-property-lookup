@@ -2653,7 +2653,7 @@ def search_ai(
                 unit_number=filters["unit_number"],
                 project_name=filters["project_name"],
                 property_type=filters["property_type"],
-                result_count=results_response.get("count", 0),
+                result_count=len(results_response.get("results", [])),
                 metadata={
                     "district": filters["district"],
                     "master_community": filters["master_community"],
