@@ -1,229 +1,267 @@
-"use client";
-import { useEffect, useState } from "react";
+'use client';
 
-const API_BASE = "http://72.61.117.207:8050";
+import { useEffect, useMemo, useState } from 'react';
 
-export default function Home() {
-  const [token, setToken] = useState("");
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://72.61.117.207:8050';
+
+function authHeaders(token) {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export default function HomePage() {
+  const [token, setToken] = useState('');
   const [me, setMe] = useState(null);
   const [billing, setBilling] = useState(null);
-  const [usage, setUsage] = useState([]);
-  const [email, setEmail] = useState("admin@truproplookup.trucrm.io");
-  const [password, setPassword] = useState("Admin@123456");
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loadingMe, setLoadingMe] = useState(false);
+
+  const [searchPhone, setSearchPhone] = useState('971504452757');
+  const [searchResult, setSearchResult] = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+
+  const [aiQuery, setAiQuery] = useState('find villas owned by Lara in Palma');
+  const [aiResult, setAiResult] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem("token") || "";
-    setToken(saved);
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('tpl_token') : '';
+    if (saved) {
+      setToken(saved);
+      loadProfile(saved);
+    }
   }, []);
 
-  useEffect(() => {
-    if (token) {
-      loadDashboard(token);
-    }
-  }, [token]);
-
-  async function apiGet(path, sessionToken) {
-    const res = await fetch(`${API_BASE}${path}`, {
-      headers: { Authorization: `Bearer ${sessionToken}` },
-      cache: "no-store",
-    });
-    const text = await res.text();
-    let data = {};
+  async function loadProfile(activeToken = token) {
+    if (!activeToken) return;
+    setLoadingMe(true);
     try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(text || "Invalid response");
-    }
-    if (!res.ok) throw new Error(data.detail || "Request failed");
-    return data;
-  }
-
-  async function loadDashboard(sessionToken) {
-    try {
-      setError("");
-      const [meData, billingData, usageData] = await Promise.all([
-        apiGet("/me", sessionToken),
-        apiGet("/billing/me", sessionToken),
-        apiGet("/billing/usage?limit=10", sessionToken).catch(() => ({ results: [] })),
+      const [meRes, billingRes] = await Promise.all([
+        fetch(`${API_BASE}/me`, { headers: { ...authHeaders(activeToken) }, cache: 'no-store' }),
+        fetch(`${API_BASE}/billing/me`, { headers: { ...authHeaders(activeToken) }, cache: 'no-store' }),
       ]);
-      setMe(meData);
-      setBilling(billingData);
-      setUsage(usageData.results || []);
-    } catch (err) {
-      setError(err.message || "Failed to load dashboard");
+
+      if (meRes.ok) setMe(await meRes.json());
+      if (billingRes.ok) setBilling(await billingRes.json());
+    } finally {
+      setLoadingMe(false);
     }
   }
 
-  async function login() {
+  async function handleLogin(e) {
+    e.preventDefault();
+    const form = new FormData(e.currentTarget);
+    const payload = {
+      email: String(form.get('email') || ''),
+      password: String(form.get('password') || ''),
+    };
+
+    const res = await fetch(`${API_BASE}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.detail || 'Login failed');
+      return;
+    }
+
+    setToken(data.session_token);
+    localStorage.setItem('tpl_token', data.session_token);
+    setMe(data.user);
+    await loadProfile(data.session_token);
+  }
+
+  async function runSearch() {
+    if (!token) return alert('Please login first');
+    setSearchLoading(true);
     try {
-      setLoading(true);
-      setError("");
-      const res = await fetch(`${API_BASE}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+      const url = new URL(`${API_BASE}/search`);
+      url.searchParams.set('phone', searchPhone);
+      url.searchParams.set('limit', '1');
+
+      const res = await fetch(url.toString(), {
+        headers: { ...authHeaders(token) },
       });
-      const text = await res.text();
-      let data = {};
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error(text || "Invalid login response");
-      }
-      if (!res.ok) throw new Error(data.detail || "Login failed");
-      localStorage.setItem("token", data.session_token);
-      setToken(data.session_token);
-    } catch (err) {
-      setError(err.message || "Login failed");
+      const data = await res.json();
+      setSearchResult(data);
+      await loadProfile(token);
     } finally {
-      setLoading(false);
+      setSearchLoading(false);
     }
   }
 
-  function logout() {
-    localStorage.removeItem("token");
-    setToken("");
-    setMe(null);
-    setBilling(null);
-    setUsage([]);
-    setResults([]);
-    setError("");
-  }
-
-  async function searchAI() {
+  async function runAiSearch() {
+    if (!token) return alert('Please login first');
+    setAiLoading(true);
     try {
-      setLoading(true);
-      setError("");
-      const data = await apiGet(`/search-ai?q=${encodeURIComponent(query)}`, token);
-      setResults(data.results || []);
-      await loadDashboard(token);
-    } catch (err) {
-      setError(err.message || "Search failed");
+      const url = new URL(`${API_BASE}/search-ai`);
+      url.searchParams.set('q', aiQuery);
+
+      const res = await fetch(url.toString(), {
+        headers: { ...authHeaders(token) },
+      });
+      const data = await res.json();
+      setAiResult(data);
+      await loadProfile(token);
     } finally {
-      setLoading(false);
+      setAiLoading(false);
     }
   }
 
-  if (!token) {
-    return (
-      <main style={{ maxWidth: 520, margin: "60px auto", background: "#fff", padding: 32, borderRadius: 16, fontFamily: "Arial, sans-serif", boxShadow: "0 12px 32px rgba(0,0,0,0.08)" }}>
-        <h1 style={{ marginTop: 0 }}>Tru Property Lookup</h1>
-        <p>Login to access search, owner detail, and billing.</p>
-        <input style={{ width: "100%", padding: 12, marginBottom: 12, border: "1px solid #ddd", borderRadius: 10 }} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-        <input style={{ width: "100%", padding: 12, marginBottom: 12, border: "1px solid #ddd", borderRadius: 10 }} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-        <button onClick={login} disabled={loading} style={{ padding: "12px 18px", borderRadius: 10, border: 0, background: "#111827", color: "#fff", cursor: "pointer" }}>
-          {loading ? "Logging in..." : "Login"}
-        </button>
-        {error ? <p style={{ color: "crimson", marginTop: 12 }}>{error}</p> : null}
-      </main>
+  const usagePercent = useMemo(() => {
+    if (!billing?.monthly_search_limit) return 0;
+    return Math.min(
+      100,
+      Math.round(((billing.monthly_search_count || 0) / billing.monthly_search_limit) * 100)
     );
-  }
+  }, [billing]);
 
   return (
-    <main style={{ maxWidth: 1100, margin: "32px auto", fontFamily: "Arial, sans-serif" }}>
-      <div style={{ background: "#fff", padding: 24, borderRadius: 18, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", marginBottom: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+    <main style={{ fontFamily: 'Arial, sans-serif', background: '#f6f7fb', minHeight: '100vh', padding: 24 }}>
+      <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12, flexWrap: 'wrap' }}>
           <div>
             <h1 style={{ margin: 0 }}>Tru Property Lookup</h1>
-            <div style={{ marginTop: 8, color: "#555" }}>{me?.full_name} · {me?.email}</div>
+            <p style={{ margin: '6px 0 0', color: '#666' }}>SaaS dashboard, billing, search, AI search, and owner lookup</p>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {me?.is_superadmin ? (
-              <button onClick={() => (window.location.href = "/admin/plans")} style={{ padding: "10px 16px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}>
-                Admin Plans
-              </button>
-            ) : null}
-            <button onClick={logout} style={{ padding: "10px 16px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}>
-              Logout
-            </button>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <a href="/" style={navBtn}>Dashboard</a>
+            <a href="/billing" style={navBtn}>Billing</a>
+            <a href="/owner-search" style={navBtn}>Owner Detail</a>
+            <a href="/admin/plans" style={navBtn}>Admin Plans</a>
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 12, marginTop: 20 }}>
-          <div style={{ background: "#f8fafc", padding: 16, borderRadius: 14 }}>
-            <div style={{ fontSize: 12, color: "#666" }}>Plan</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{billing?.plan_name || me?.plan_name || "-"}</div>
-          </div>
-          <div style={{ background: "#f8fafc", padding: 16, borderRadius: 14 }}>
-            <div style={{ fontSize: 12, color: "#666" }}>Credits</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{billing?.credits_balance ?? me?.credits_balance ?? 0}</div>
-          </div>
-          <div style={{ background: "#f8fafc", padding: 16, borderRadius: 14 }}>
-            <div style={{ fontSize: 12, color: "#666" }}>Monthly Searches</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{billing?.monthly_search_count ?? me?.monthly_search_count ?? 0}</div>
-          </div>
-          <div style={{ background: "#f8fafc", padding: 16, borderRadius: 14 }}>
-            <div style={{ fontSize: 12, color: "#666" }}>Monthly Limit</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{billing?.monthly_search_limit ?? me?.monthly_search_limit ?? 0}</div>
-          </div>
-        </div>
-      </div>
+        {!token ? (
+          <section style={card}>
+            <h2 style={{ marginTop: 0 }}>Login</h2>
+            <form onSubmit={handleLogin} style={{ display: 'grid', gap: 12, maxWidth: 420 }}>
+              <input name="email" defaultValue="demo@truproplookup.trucrm.io" placeholder="Email" style={input} />
+              <input name="password" defaultValue="Demo@123456" type="password" placeholder="Password" style={input} />
+              <button type="submit" style={primaryBtn}>Login</button>
+            </form>
+          </section>
+        ) : (
+          <>
+            <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))', gap: 16, marginBottom: 20 }}>
+              <div style={card}>
+                <div style={label}>Plan</div>
+                <div style={metric}>{billing?.plan_name || me?.plan_name || '-'}</div>
+                <div style={subtle}>{me?.email}</div>
+              </div>
+              <div style={card}>
+                <div style={label}>Credits Balance</div>
+                <div style={metric}>{billing?.credits_balance ?? me?.credits_balance ?? 0}</div>
+                <div style={subtle}>Remaining credits</div>
+              </div>
+              <div style={card}>
+                <div style={label}>Monthly Search Usage</div>
+                <div style={metric}>{billing?.monthly_search_count ?? 0} / {billing?.monthly_search_limit ?? 0}</div>
+                <div style={{ marginTop: 10, height: 10, background: '#e8ecf5', borderRadius: 999 }}>
+                  <div style={{ width: `${usagePercent}%`, height: '100%', borderRadius: 999, background: '#1d4ed8' }} />
+                </div>
+              </div>
+              <div style={card}>
+                <div style={label}>Billing Status</div>
+                <div style={metric}>{billing?.billing_status || me?.billing_status || '-'}</div>
+                <div style={subtle}>Reset: {billing?.credits_reset_at || me?.credits_reset_at || '-'}</div>
+              </div>
+            </section>
 
-      <div style={{ background: "#fff", padding: 24, borderRadius: 18, boxShadow: "0 10px 30px rgba(0,0,0,0.08)", marginBottom: 20 }}>
-        <h2 style={{ marginTop: 0 }}>AI Search</h2>
-        <div style={{ display: "flex", gap: 10 }}>
-          <input
-            style={{ flex: 1, padding: 14, border: "1px solid #ddd", borderRadius: 12 }}
-            placeholder="find villas owned by Lara in Palma"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <button onClick={searchAI} disabled={loading} style={{ padding: "14px 18px", borderRadius: 12, border: 0, background: "#111827", color: "#fff", cursor: "pointer" }}>
-            {loading ? "Searching..." : "Search"}
-          </button>
-        </div>
-        {error ? <p style={{ color: "crimson", marginTop: 12 }}>{error}</p> : null}
+            <section style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+              <div style={card}>
+                <h3 style={{ marginTop: 0 }}>Standard Search</h3>
+                <input value={searchPhone} onChange={(e) => setSearchPhone(e.target.value)} style={input} />
+                <button onClick={runSearch} disabled={searchLoading} style={primaryBtn}>
+                  {searchLoading ? 'Searching...' : 'Run Search'}
+                </button>
+                {searchResult && <pre style={pre}>{JSON.stringify(searchResult, null, 2)}</pre>}
+              </div>
 
-        <div style={{ marginTop: 20 }}>
-          {results.map((r) => (
-            <div
-              key={r.link_id || r.id}
-              onClick={() => window.location.href = `/owner/${r.owner_id || r.id}`}
-              style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, marginBottom: 12, cursor: "pointer" }}
-            >
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>{r.owner_name}</div>
-              <div>Phone: {r.phone || "-"}</div>
-              <div>Unit: {r.unit_number || "-"}</div>
-              <div>Project: {r.project_name || "-"}</div>
-              <div>Type: {r.property_type || "-"}</div>
-            </div>
-          ))}
-        </div>
-      </div>
+              <div style={card}>
+                <h3 style={{ marginTop: 0 }}>AI Search</h3>
+                <textarea value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} style={{ ...input, minHeight: 90 }} />
+                <button onClick={runAiSearch} disabled={aiLoading} style={primaryBtn}>
+                  {aiLoading ? 'Running...' : 'Run AI Search'}
+                </button>
+                {aiResult && <pre style={pre}>{JSON.stringify(aiResult, null, 2)}</pre>}
+              </div>
+            </section>
 
-      <div style={{ background: "#fff", padding: 24, borderRadius: 18, boxShadow: "0 10px 30px rgba(0,0,0,0.08)" }}>
-        <h2 style={{ marginTop: 0 }}>Recent Usage</h2>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th style={{ padding: "10px 8px" }}>Endpoint</th>
-                <th style={{ padding: "10px 8px" }}>Query</th>
-                <th style={{ padding: "10px 8px" }}>Credits</th>
-                <th style={{ padding: "10px 8px" }}>Results</th>
-                <th style={{ padding: "10px 8px" }}>Area Tier</th>
-                <th style={{ padding: "10px 8px" }}>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {usage.map((u) => (
-                <tr key={u.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                  <td style={{ padding: "10px 8px" }}>{u.endpoint}</td>
-                  <td style={{ padding: "10px 8px" }}>{u.query_text || u.phone || u.owner_name || "-"}</td>
-                  <td style={{ padding: "10px 8px" }}>{u.credits_used}</td>
-                  <td style={{ padding: "10px 8px" }}>{u.result_count}</td>
-                  <td style={{ padding: "10px 8px" }}>{u.area_tier}</td>
-                  <td style={{ padding: "10px 8px" }}>{u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            <section style={card}>
+              <h3 style={{ marginTop: 0 }}>Session</h3>
+              {loadingMe ? <p>Loading profile...</p> : <pre style={pre}>{JSON.stringify({ me, billing }, null, 2)}</pre>}
+            </section>
+          </>
+        )}
       </div>
     </main>
   );
 }
+
+const card = {
+  background: '#fff',
+  borderRadius: 16,
+  padding: 18,
+  boxShadow: '0 8px 24px rgba(15,23,42,0.06)',
+};
+
+const input = {
+  width: '100%',
+  padding: '12px 14px',
+  border: '1px solid #d7deea',
+  borderRadius: 10,
+  fontSize: 14,
+  boxSizing: 'border-box',
+};
+
+const primaryBtn = {
+  marginTop: 12,
+  padding: '12px 16px',
+  border: 0,
+  borderRadius: 10,
+  background: '#111827',
+  color: '#fff',
+  cursor: 'pointer',
+  fontWeight: 600,
+};
+
+const navBtn = {
+  textDecoration: 'none',
+  padding: '10px 14px',
+  borderRadius: 10,
+  background: '#111827',
+  color: '#fff',
+  fontWeight: 600,
+};
+
+const metric = {
+  fontSize: 28,
+  fontWeight: 700,
+  marginTop: 6,
+};
+
+const label = {
+  fontSize: 12,
+  color: '#6b7280',
+  textTransform: 'uppercase',
+  letterSpacing: '.06em',
+};
+
+const subtle = {
+  color: '#6b7280',
+  marginTop: 8,
+  fontSize: 13,
+};
+
+const pre = {
+  marginTop: 14,
+  background: '#0b1020',
+  color: '#d1e7ff',
+  padding: 14,
+  borderRadius: 12,
+  overflow: 'auto',
+  fontSize: 12,
+  whiteSpace: 'pre-wrap',
+};
