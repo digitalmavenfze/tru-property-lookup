@@ -2566,7 +2566,7 @@ def search_ai(
     filters = parse_ai_search_query(q)
 
     results_response = search_properties(
-        authorization=authorization,
+        authorization=f"Bearer {authorization.split(' ', 1)[1]}" if authorization and authorization.startswith("Bearer ") else authorization,
         owner_name=filters.get("owner_name", ""),
         email=filters.get("email", ""),
         phone=filters.get("phone", ""),
