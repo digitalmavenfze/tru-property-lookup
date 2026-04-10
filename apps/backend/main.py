@@ -2653,8 +2653,8 @@ def search_ai(
                 unit_number=filters["unit_number"],
                 project_name=filters["project_name"],
                 property_type=filters["property_type"],
-                _ai_results = results_response.get("results") or []
-                result_count=(len(_ai_results) if _ai_results else (results_response.get("count") or 0)),
+                result_count=len(results_response.get("results") or []),
+
                 metadata={
                     "district": filters["district"],
                     "master_community": filters["master_community"],
