@@ -131,9 +131,16 @@ export default function Home() {
             <h1 style={{ margin: 0 }}>Tru Property Lookup</h1>
             <div style={{ marginTop: 8, color: "#555" }}>{me?.full_name} · {me?.email}</div>
           </div>
-          <button onClick={logout} style={{ padding: "10px 16px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}>
-            Logout
-          </button>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {me?.is_superadmin ? (
+              <button onClick={() => (window.location.href = "/admin/plans")} style={{ padding: "10px 16px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}>
+                Admin Plans
+              </button>
+            ) : null}
+            <button onClick={logout} style={{ padding: "10px 16px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}>
+              Logout
+            </button>
+          </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 12, marginTop: 20 }}>
