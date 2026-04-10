@@ -2563,75 +2563,20 @@ def search_ai(
 ):
     user = get_current_user_from_auth(authorization)
 
-    q_norm = clean_text(q).lower()
-    filters = {
-        "owner_name": "",
-        "email": "",
-        "phone": "",
-        "district": "",
-        "master_community": "",
-        "project_name": "",
-        "sub_community": "",
-        "bedroom_count": "",
-        "unit_number": "",
-        "property_type": "",
-    }
-
-    phone_match = re.search(r"(971\d{9}|05\d{8}|\d{7,15})", q_norm)
-    if phone_match:
-        filters["phone"] = phone_match.group(1)
-
-    unit_match = re.search(r"(?:unit|plot|villa)\s+([a-z0-9\-/]+)", q_norm)
-    if unit_match:
-        filters["unit_number"] = unit_match.group(1).upper()
-
-    property_types = ["villa", "apartment", "commercial", "office", "retail", "plot", "warehouse"]
-    for pt in property_types:
-        if pt in q_norm:
-            filters["property_type"] = pt.title()
-            break
-
-    known_areas = [
-        "palma",
-        "arabian ranches",
-        "dubai marina",
-        "downtown dubai",
-        "palm jumeirah",
-        "emirates hills",
-        "district one",
-        "jumeirah bay",
-    ]
-    for area in known_areas:
-        if area in q_norm:
-            if area == "palma":
-                filters["project_name"] = "PALMA"
-                filters["sub_community"] = "PALMA"
-            else:
-                filters["project_name"] = area.upper()
-            break
-
-    stop_words = {
-        "find", "show", "search", "owned", "owner", "owners", "by", "in", "with",
-        "phone", "email", "unit", "plot", "villa", "apartment", "commercial",
-        "office", "retail", "warehouse", "property", "properties"
-    }
-    tokens = [t for t in re.split(r"[^a-z0-9]+", q_norm) if t]
-    candidate_name = " ".join([t for t in tokens if t not in stop_words and not t.isdigit()])
-    if candidate_name and not filters["phone"] and not filters["unit_number"]:
-        filters["owner_name"] = candidate_name
+    filters = parse_ai_search_query(q)
 
     results_response = search_properties(
         authorization=authorization,
-        owner_name=filters["owner_name"],
-        email=filters["email"],
-        phone=filters["phone"],
-        district=filters["district"],
-        master_community=filters["master_community"],
-        project_name=filters["project_name"],
-        sub_community=filters["sub_community"],
-        bedroom_count=filters["bedroom_count"],
-        unit_number=filters["unit_number"],
-        property_type=filters["property_type"],
+        owner_name=filters.get("owner_name", ""),
+        email=filters.get("email", ""),
+        phone=filters.get("phone", ""),
+        district=filters.get("district", ""),
+        master_community=filters.get("master_community", ""),
+        project_name=filters.get("project_name", ""),
+        sub_community=filters.get("sub_community", ""),
+        bedroom_count=filters.get("bedroom_count", ""),
+        unit_number=filters.get("unit_number", ""),
+        property_type=filters.get("property_type", ""),
         limit=limit,
         offset=offset,
         suppress_billing=True,
@@ -2644,26 +2589,21 @@ def search_ai(
                 user=user,
                 endpoint="/search-ai",
                 query_text=q,
-                owner_name=filters["owner_name"],
-                phone=filters["phone"],
-                email=filters["email"],
-                unit_number=filters["unit_number"],
-                project_name=filters["project_name"],
-                property_type=filters["property_type"],
+                owner_name=filters.get("owner_name", ""),
+                phone=filters.get("phone", ""),
+                email=filters.get("email", ""),
+                unit_number=filters.get("unit_number", ""),
+                project_name=filters.get("project_name", ""),
+                property_type=filters.get("property_type", ""),
                 result_count=len(results_response.get("results", [])),
-
                 metadata={
-                    "district": filters["district"],
-                    "master_community": filters["master_community"],
-                    "sub_community": filters["sub_community"],
+                    "district": filters.get("district", ""),
+                    "master_community": filters.get("master_community", ""),
+                    "sub_community": filters.get("sub_community", ""),
                     "ai_query": q,
                 },
             )
         conn.commit()
-
-    _ai_results = results_response.get("results") or []
-    if _ai_results:
-        results_response["count"] = len(_ai_results)
 
     results_response["credits_used"] = billing_meta["credits_used"]
     results_response["credits_balance"] = billing_meta["credits_balance"]
