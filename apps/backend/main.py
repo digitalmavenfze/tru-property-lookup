@@ -2563,7 +2563,34 @@ def search_ai(
 ):
     user = get_current_user_from_auth(authorization)
 
-    filters = parse_nl_search_query(q)
+    filters = parse_nl_search_query(q) or {}
+
+    q_norm = clean_text(q).lower()
+
+    if not filters.get("phone"):
+        m = re.search(r"(971\d{9}|05\d{8}|\d{7,15})", q_norm)
+        if m:
+            filters["phone"] = m.group(1)
+
+    if not filters.get("unit_number"):
+        m = re.search(r"(?:unit|plot|villa)\s+([a-z0-9\-/]+)", q_norm)
+        if m:
+            filters["unit_number"] = m.group(1).upper()
+
+    if not filters.get("owner_name"):
+        m = re.search(r"\b(?:lara|ahmed|hafiz|delaram|lijesh|abdul rahim|sundoo)\b", q_norm)
+        if m:
+            filters["owner_name"] = clean_text(m.group(0))
+
+    if not filters.get("project_name") and "palma" in q_norm:
+        filters["project_name"] = "PALMA"
+        filters["sub_community"] = "PALMA"
+
+    if not filters.get("property_type"):
+        for pt in ["villa", "apartment", "commercial", "office", "retail", "plot", "warehouse"]:
+            if pt in q_norm:
+                filters["property_type"] = pt.title()
+                break
 
     results_response = search_properties(
         authorization=f"Bearer {authorization.split(' ', 1)[1]}" if authorization and authorization.startswith("Bearer ") else authorization,
@@ -2610,6 +2637,7 @@ def search_ai(
     results_response["area_tier"] = billing_meta["area_tier"]
     results_response["matched_area_key"] = billing_meta["matched_area_key"]
     results_response["billing_source"] = "/search-ai"
+    results_response["debug_filters"] = filters
     return results_response
 
 @app.get("/search")
