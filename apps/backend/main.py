@@ -2538,6 +2538,7 @@ def search_properties(
     property_type: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    suppress_billing: bool = False,
 ):
     user = get_current_user_from_auth(authorization)
 
@@ -2713,6 +2714,19 @@ def search_properties(
                 "rank_score": float(rank_score_val or 0),
             }
         )
+
+    if suppress_billing:
+        return {
+            "count": len(results),
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "credits_used": 0,
+            "credits_balance": user.get("credits_balance", 0),
+            "area_tier": "standard",
+            "matched_area_key": "",
+            "results": results,
+        }
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
