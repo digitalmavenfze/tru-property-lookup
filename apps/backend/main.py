@@ -2898,6 +2898,30 @@ def search_properties(
     }
 
 
+
+
+@app.get("/export")
+def export_data(
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+
+    plan_code = (user.get("plan_code") or "").lower()
+    is_superadmin = bool(user.get("is_superadmin", False))
+
+    export_enabled = is_superadmin or plan_code in {"pro", "enterprise"}
+
+    if not export_enabled:
+        raise HTTPException(status_code=403, detail="Export not enabled for your plan")
+
+    return {
+        "ok": True,
+        "message": "Export endpoint is enabled",
+        "user_email": user.get("email", ""),
+        "plan_code": user.get("plan_code", ""),
+        "export_enabled": True,
+    }
+
 @app.get("/owners/{owner_id}")
 
 def get_owner_detail(
