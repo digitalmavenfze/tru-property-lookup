@@ -2565,6 +2565,11 @@ def search_ai(
 
     filters = parse_nl_search_query(q) or {}
 
+    owner_name_cleaned = clean_text(filters.get("owner_name", ""))
+    if owner_name_cleaned:
+        owner_name_cleaned = re.split(r'\b(?:in|at|with|phone|email|unit|plot)\b', owner_name_cleaned, maxsplit=1, flags=re.I)[0].strip(" ,-")
+        filters["owner_name"] = owner_name_cleaned
+
     q_norm = clean_text(q).lower()
 
     if not filters.get("phone"):
@@ -2637,7 +2642,6 @@ def search_ai(
     results_response["area_tier"] = billing_meta["area_tier"]
     results_response["matched_area_key"] = billing_meta["matched_area_key"]
     results_response["billing_source"] = "/search-ai"
-    results_response["debug_filters"] = filters
     return results_response
 
 @app.get("/search")
