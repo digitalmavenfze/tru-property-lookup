@@ -2563,7 +2563,7 @@ def search_ai(
 ):
     user = get_current_user_from_auth(authorization)
 
-    filters = parse_ai_search_query(q)
+    filters = parse_nl_search_query(q)
 
     results_response = search_properties(
         authorization=f"Bearer {authorization.split(' ', 1)[1]}" if authorization and authorization.startswith("Bearer ") else authorization,
