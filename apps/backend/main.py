@@ -2653,7 +2653,8 @@ def search_ai(
                 unit_number=filters["unit_number"],
                 project_name=filters["project_name"],
                 property_type=filters["property_type"],
-                result_count=len(results_response.get("results", [])),
+                _ai_results = results_response.get("results") or []
+                result_count=(len(_ai_results) if _ai_results else (results_response.get("count") or 0)),
                 metadata={
                     "district": filters["district"],
                     "master_community": filters["master_community"],
@@ -2662,6 +2663,10 @@ def search_ai(
                 },
             )
         conn.commit()
+
+    _ai_results = results_response.get("results") or []
+    if _ai_results:
+        results_response["count"] = len(_ai_results)
 
     results_response["credits_used"] = billing_meta["credits_used"]
     results_response["credits_balance"] = billing_meta["credits_balance"]
