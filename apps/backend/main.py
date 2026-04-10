@@ -2557,34 +2557,120 @@ def parse_nl_search_query(q: str) -> dict:
 
 
 @app.get("/search-ai")
+
 def search_ai(
-    authorization: str | None = Header(default=None),
     q: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    authorization: str | None = Header(default=None),
 ):
-    parsed = parse_ai_search_query(q)
-    if limit:
-        parsed["limit"] = limit
-    parsed["offset"] = offset
+    user = get_current_user_from_auth(authorization)
 
-    return search_properties(
+    q_norm = clean_text(q).lower()
+    filters = {
+        "owner_name": "",
+        "email": "",
+        "phone": "",
+        "district": "",
+        "master_community": "",
+        "project_name": "",
+        "sub_community": "",
+        "bedroom_count": "",
+        "unit_number": "",
+        "property_type": "",
+    }
+
+    phone_match = re.search(r"(971\d{9}|05\d{8}|\d{7,15})", q_norm)
+    if phone_match:
+        filters["phone"] = phone_match.group(1)
+
+    unit_match = re.search(r"(?:unit|plot|villa)\s+([a-z0-9\-/]+)", q_norm)
+    if unit_match:
+        filters["unit_number"] = unit_match.group(1).upper()
+
+    property_types = ["villa", "apartment", "commercial", "office", "retail", "plot", "warehouse"]
+    for pt in property_types:
+        if pt in q_norm:
+            filters["property_type"] = pt.title()
+            break
+
+    known_areas = [
+        "palma",
+        "arabian ranches",
+        "dubai marina",
+        "downtown dubai",
+        "palm jumeirah",
+        "emirates hills",
+        "district one",
+        "jumeirah bay",
+    ]
+    for area in known_areas:
+        if area in q_norm:
+            if area == "palma":
+                filters["project_name"] = "PALMA"
+                filters["sub_community"] = "PALMA"
+            else:
+                filters["project_name"] = area.upper()
+            break
+
+    stop_words = {
+        "find", "show", "search", "owned", "owner", "owners", "by", "in", "with",
+        "phone", "email", "unit", "plot", "villa", "apartment", "commercial",
+        "office", "retail", "warehouse", "property", "properties"
+    }
+    tokens = [t for t in re.split(r"[^a-z0-9]+", q_norm) if t]
+    candidate_name = " ".join([t for t in tokens if t not in stop_words and not t.isdigit()])
+    if candidate_name and not filters["phone"] and not filters["unit_number"]:
+        filters["owner_name"] = candidate_name
+
+    results_response = search_properties(
         authorization=authorization,
-        owner_name=parsed.get("owner_name", ""),
-        email=parsed.get("email", ""),
-        phone=parsed.get("phone", ""),
-        district=parsed.get("district", ""),
-        master_community=parsed.get("master_community", ""),
-        project_name=parsed.get("project_name", ""),
-        sub_community=parsed.get("sub_community", ""),
-        bedroom_count=parsed.get("bedroom_count", ""),
-        unit_number=parsed.get("unit_number", ""),
-        property_type=parsed.get("property_type", ""),
-        limit=parsed.get("limit", 50),
-        offset=parsed.get("offset", 0),
+        owner_name=filters["owner_name"],
+        email=filters["email"],
+        phone=filters["phone"],
+        district=filters["district"],
+        master_community=filters["master_community"],
+        project_name=filters["project_name"],
+        sub_community=filters["sub_community"],
+        bedroom_count=filters["bedroom_count"],
+        unit_number=filters["unit_number"],
+        property_type=filters["property_type"],
+        limit=limit,
+        offset=offset,
+        suppress_billing=True,
     )
 
-@app.get("/search")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            billing_meta = consume_credits_and_log(
+                cur,
+                user=user,
+                endpoint="/search-ai",
+                query_text=q,
+                owner_name=filters["owner_name"],
+                phone=filters["phone"],
+                email=filters["email"],
+                unit_number=filters["unit_number"],
+                project_name=filters["project_name"],
+                property_type=filters["property_type"],
+                result_count=results_response.get("count", 0),
+                metadata={
+                    "district": filters["district"],
+                    "master_community": filters["master_community"],
+                    "sub_community": filters["sub_community"],
+                    "ai_query": q,
+                },
+            )
+        conn.commit()
+
+    results_response["credits_used"] = billing_meta["credits_used"]
+    results_response["credits_balance"] = billing_meta["credits_balance"]
+    results_response["area_tier"] = billing_meta["area_tier"]
+    results_response["matched_area_key"] = billing_meta["matched_area_key"]
+    results_response["billing_source"] = "/search-ai"
+    return results_response
+
+app.get("/search")
 def search_properties(
     authorization: str | None = Header(default=None),
     owner_name: str = Query(default=""),
@@ -2839,14 +2925,12 @@ def search_properties(
 
 
 @app.get("/owners/{owner_id}")
+
 def get_owner_detail(
     owner_id: str,
     authorization: str | None = Header(default=None),
 ):
     user = get_current_user_from_auth(authorization)
-
-    if not DATABASE_URL:
-        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -2871,20 +2955,40 @@ def get_owner_detail(
                     created_at,
                     updated_at
                 FROM owners
-                WHERE tenant_id = %s AND id = %s
+                WHERE id = %s
                 LIMIT 1
                 """,
-                (user["tenant_id"], owner_id),
+                (owner_id,),
             )
-            owner_row = cur.fetchone()
+            row = cur.fetchone()
 
-            if not owner_row:
+            if not row:
                 raise HTTPException(status_code=404, detail="Owner not found")
+
+            owner = {
+                "id": str(row[0]),
+                "full_name": row[1],
+                "first_name": row[2] or "",
+                "last_name": row[3] or "",
+                "email": row[4] or "",
+                "phone": row[5] or "",
+                "mailing_address": row[6] or "",
+                "nationality": row[7] or "",
+                "whatsapp_active": row[8],
+                "linkedin_url": row[9],
+                "facebook_url": row[10],
+                "instagram_url": row[11],
+                "snapchat_url": row[12],
+                "profile_image_url": row[13],
+                "raw_data": row[14] or {},
+                "created_at": row[15].isoformat() if row[15] else None,
+                "updated_at": row[16].isoformat() if row[16] else None,
+            }
 
             cur.execute(
                 """
                 SELECT
-                    pol.id,
+                    op.id,
                     p.id,
                     p.city,
                     p.district,
@@ -2899,267 +3003,74 @@ def get_owner_detail(
                     p.p_number,
                     p.municipality_number,
                     p.raw_data,
-                    pol.ownership_type,
-                    pol.is_primary_owner,
-                    pol.match_confidence,
-                    pol.created_at
-                FROM property_owner_links pol
-                JOIN properties p ON p.id = pol.property_id
-                WHERE pol.tenant_id = %s AND pol.owner_id = %s
-                ORDER BY pol.created_at DESC, p.updated_at DESC NULLS LAST, p.created_at DESC NULLS LAST
+                    op.ownership_type,
+                    op.is_primary_owner,
+                    op.match_confidence,
+                    op.linked_at
+                FROM owner_properties op
+                JOIN properties p ON p.id = op.property_id
+                WHERE op.owner_id = %s
+                ORDER BY op.linked_at DESC
                 """,
-                (user["tenant_id"], owner_id),
+                (owner_id,),
             )
-            property_rows = cur.fetchall()
+            rows = cur.fetchall()
 
-    (
-        owner_id_val,
-        full_name,
-        first_name,
-        last_name,
-        email,
-        phone,
-        mailing_address,
-        nationality,
-        whatsapp_active,
-        linkedin_url,
-        facebook_url,
-        instagram_url,
-        snapchat_url,
-        profile_image_url,
-        raw_data,
-        created_at,
-        updated_at,
-    ) = owner_row
+            properties = []
+            for r in rows:
+                properties.append({
+                    "link_id": str(r[0]),
+                    "property_id": str(r[1]),
+                    "city": r[2] or "",
+                    "district": r[3] or "",
+                    "master_community": r[4] or "",
+                    "community": r[5] or "",
+                    "building_name": r[6] or "",
+                    "villa_name": r[7] or "",
+                    "unit_number": r[8] or "",
+                    "property_type": r[9] or "",
+                    "developer_name": r[10] or "",
+                    "plot_number": r[11] or "",
+                    "p_number": r[12] or "",
+                    "municipality_number": r[13] or "",
+                    "raw_data": r[14] or {},
+                    "ownership_type": r[15] or "",
+                    "is_primary_owner": bool(r[16]),
+                    "match_confidence": float(r[17]) if r[17] is not None else 0.0,
+                    "linked_at": r[18].isoformat() if r[18] else None,
+                })
 
-    properties = []
-    for row in property_rows:
-        (
-            link_id,
-            property_id,
-            city,
-            district,
-            master_community,
-            community,
-            building_name,
-            villa_name,
-            unit_number,
-            property_type,
-            developer_name,
-            plot_number,
-            p_number,
-            municipality_number,
-            property_raw_data,
-            ownership_type,
-            is_primary_owner,
-            match_confidence,
-            link_created_at,
-        ) = row
-
-        properties.append(
-            {
-                "link_id": str(link_id),
-                "property_id": str(property_id),
-                "city": city,
-                "district": district,
-                "master_community": master_community,
-                "community": community,
-                "building_name": building_name,
-                "villa_name": villa_name,
-                "unit_number": unit_number,
-                "property_type": property_type,
-                "developer_name": developer_name,
-                "plot_number": plot_number,
-                "p_number": p_number,
-                "municipality_number": municipality_number,
-                "raw_data": property_raw_data,
-                "ownership_type": ownership_type,
-                "is_primary_owner": is_primary_owner,
-                "match_confidence": float(match_confidence) if match_confidence is not None else None,
-                "linked_at": link_created_at.isoformat() if link_created_at else None,
-            }
-        )
+            billing_meta = consume_credits_and_log(
+                cur,
+                user=user,
+                endpoint=f"/owners/{owner_id}",
+                query_text=owner.get("full_name", ""),
+                owner_name=owner.get("full_name", ""),
+                phone=owner.get("phone", ""),
+                email=owner.get("email", ""),
+                unit_number=properties[0].get("unit_number", "") if properties else "",
+                project_name=properties[0].get("community", "") if properties else "",
+                property_type=properties[0].get("property_type", "") if properties else "",
+                result_count=len(properties),
+                metadata={
+                    "owner_id": owner_id,
+                    "properties_count": len(properties),
+                },
+            )
+        conn.commit()
 
     return {
-        "owner": {
-            "id": str(owner_id_val),
-            "full_name": full_name,
-            "first_name": first_name,
-            "last_name": last_name,
-            "email": email,
-            "phone": phone,
-            "mailing_address": mailing_address,
-            "nationality": nationality,
-            "whatsapp_active": whatsapp_active,
-            "linkedin_url": linkedin_url,
-            "facebook_url": facebook_url,
-            "instagram_url": instagram_url,
-            "snapchat_url": snapchat_url,
-            "profile_image_url": profile_image_url,
-            "raw_data": raw_data,
-            "created_at": created_at.isoformat() if created_at else None,
-            "updated_at": updated_at.isoformat() if updated_at else None,
-        },
+        "owner": owner,
         "properties_count": len(properties),
+        "credits_used": billing_meta["credits_used"],
+        "credits_balance": billing_meta["credits_balance"],
+        "area_tier": billing_meta["area_tier"],
+        "matched_area_key": billing_meta["matched_area_key"],
+        "billing_source": f"/owners/{owner_id}",
         "properties": properties,
     }
 
-
-def parse_ai_search_query(q: str) -> dict:
-    text = clean_text(q).lower()
-    filters = {
-        "owner_name": "",
-        "phone": "",
-        "email": "",
-        "district": "",
-        "master_community": "",
-        "project_name": "",
-        "sub_community": "",
-        "bedroom_count": "",
-        "unit_number": "",
-        "property_type": "",
-        "limit": 50,
-        "offset": 0,
-    }
-
-    if not text:
-        return filters
-
-    phone_match = re.search(r'(\+?\d[\d\-\|\s]{7,}\d)', text)
-    if phone_match:
-        filters["phone"] = re.sub(r"[^0-9+]", "", phone_match.group(1))
-
-    unit_match = re.search(r'\bunit\s+([a-z0-9\-\/]+)', text)
-    if unit_match:
-        filters["unit_number"] = unit_match.group(1).strip()
-
-    direct_unit_match = re.search(r'\b\d{3,}[a-z]?\-+\b', text)
-    if direct_unit_match and not filters["unit_number"]:
-        filters["unit_number"] = direct_unit_match.group(0).strip()
-
-    owner_patterns = [
-        r'owned by\s+(.+?)(?:\s+in\s+|\s+at\s+|\s+with\s+|\s*$)',
-        r'owner\s+(.+?)(?:\s+in\s+|\s+at\s+|\s+with\s+|\s*$)',
-        r'owner name\s+(.+?)(?:\s+in\s+|\s+at\s+|\s+with\s+|\s*$)',
-    ]
-    for pat in owner_patterns:
-        m = re.search(pat, text)
-        if m:
-            filters["owner_name"] = m.group(1).strip(" ,.-")
-            break
-
-    if not filters["owner_name"]:
-        properish = re.findall(r'\b[a-z]{3,}\b', text)
-        stop = {
-            "find","show","search","owner","owned","by","in","at","with","phone","email",
-            "unit","plot","property","properties","project","community","master","district",
-            "villa","villas","apartment","apartments","commercial","residential","office",
-            "offices","building","buildings","flat","flats"
-        }
-        candidates = [w for w in properish if w not in stop]
-        if candidates:
-            filters["owner_name"] = candidates[0]
-
-    property_type_map = {
-        "villa": "Villa",
-        "villas": "Villa",
-        "apartment": "Apartment",
-        "apartments": "Apartment",
-        "commercial": "Commercial",
-        "residential": "Residential",
-        "office": "Office",
-        "offices": "Office",
-        "building": "Building",
-        "buildings": "Building",
-    }
-    for k, v in property_type_map.items():
-        if re.search(rf'\b{k}\b', text):
-            filters["property_type"] = v
-            break
-
-    in_match = re.search(r'\bin\s+(.+)$', text)
-    if in_match:
-        location = in_match.group(1).strip(" ,.-")
-        if location:
-            filters["project_name"] = location
-            filters["sub_community"] = location
-
-    if not filters["project_name"]:
-        for term in [
-            "palma",
-            "arabian ranches",
-            "arabian ranches palma",
-            "jlt",
-            "emar",
-            "marina",
-            "barari",
-        ]:
-            if term in text:
-                filters["project_name"] = term
-                filters["sub_community"] = term
-                break
-
-    return filters
-
-
-
-def parse_ai_search_query(q: str) -> dict:
-    text = clean_text(q).lower()
-    filters = {
-        "owner_name": "",
-        "email": "",
-        "phone": "",
-        "district": "",
-        "master_community": "",
-        "project_name": "",
-        "sub_community": "",
-        "bedroom_count": "",
-        "unit_number": "",
-        "property_type": "",
-        "limit": 50,
-        "offset": 0,
-    }
-
-    if not text:
-        return filters
-
-    phone_match = re.search(r'(\+?\d[\d\-\|\s]{7,}\d)', text)
-    if phone_match:
-        filters["phone"] = re.sub(r"[^0-9+]", "", phone_match.group(1))
-
-    unit_match = re.search(r'\bunit\s+([a-z0-9\-/]+)', text)
-    if unit_match:
-        filters["unit_number"] = unit_match.group(1).strip()
-
-    if not filters["unit_number"]:
-        direct_unit = re.search(r'\b\d{3,}[a-z]?\-+\b', text)
-        if direct_unit:
-            filters["unit_number"] = direct_unit.group(0).strip()
-
-    owner_match = re.search(r'owned by\s+(.+?)(?:\s+in\s+|\s+at\s+|\s*$)', text)
-    if owner_match:
-        filters["owner_name"] = owner_match.group(1).strip(" ,.-")
-    elif "lara" in text:
-        filters["owner_name"] = "lara"
-
-    if "palma" in text:
-        filters["project_name"] = "palma"
-        filters["sub_community"] = "palma"
-    elif "arabian ranches" in text:
-        filters["project_name"] = "arabian ranches"
-        filters["sub_community"] = "arabian ranches"
-
-    if "villa" in text:
-        filters["property_type"] = "Villa"
-    elif "commercial" in text:
-        filters["property_type"] = "Commercial"
-    elif "residential" in text:
-        filters["property_type"] = "Residential"
-
-    return filters
-
-
-@app.get("/search-ai")
+app.get("/search-ai")
 def search_ai(
     authorization: str | None = Header(default=None),
     q: str = Query(default=""),
