@@ -17,6 +17,9 @@ services:
       - ./storage:/app/storage
     env_file:
       - ./apps/backend/.env
+    environment:
+      DATABASE_URL: postgresql://tru_user:tru_password_change_me@db:5432/tru_property_lookup
+      UPLOAD_DIR: /app/storage/uploads
     build:
       context: ./apps/backend
     container_name: tru-property-backend
