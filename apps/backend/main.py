@@ -2962,29 +2962,29 @@ def get_owner_detail(
             cur.execute(
                 """
                 SELECT
-                    op.id,
+                    pol.id,
                     p.id,
-                    p.city,
-                    p.district,
-                    p.master_community,
-                    p.community,
-                    p.building_name,
-                    p.villa_name,
-                    p.unit_number,
-                    p.property_type,
-                    p.developer_name,
-                    p.plot_number,
-                    p.p_number,
-                    p.municipality_number,
-                    p.raw_data,
-                    op.ownership_type,
-                    op.is_primary_owner,
-                    op.match_confidence,
-                    op.linked_at
-                FROM owner_properties op
-                JOIN properties p ON p.id = op.property_id
-                WHERE op.owner_id = %s
-                ORDER BY op.linked_at DESC
+                    '' AS city,
+                    COALESCE(p.district, '') AS district,
+                    COALESCE(p.master_community, '') AS master_community,
+                    COALESCE(p.community, '') AS community,
+                    COALESCE(p.building_name, '') AS building_name,
+                    '' AS villa_name,
+                    COALESCE(p.unit_number, '') AS unit_number,
+                    COALESCE(p.property_type, '') AS property_type,
+                    COALESCE(p.developer_name, '') AS developer_name,
+                    COALESCE(p.plot_number, '') AS plot_number,
+                    '' AS p_number,
+                    '' AS municipality_number,
+                    COALESCE(p.raw_data, '{}'::jsonb) AS raw_data,
+                    COALESCE(pol.ownership_type, 'owner') AS ownership_type,
+                    COALESCE(pol.is_primary_owner, false) AS is_primary_owner,
+                    COALESCE(pol.match_confidence, 0) AS match_confidence,
+                    pol.created_at AS linked_at
+                FROM property_owner_links pol
+                JOIN properties p ON p.id = pol.property_id
+                WHERE pol.owner_id = %s
+                ORDER BY pol.created_at DESC
                 """,
                 (owner_id,),
             )
