@@ -901,20 +901,21 @@ def upsert_property(
 
 
 def get_current_user_from_auth(authorization: str | None):
-    if not DATABASE_URL:
-        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
-
     if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid Authorization header")
-
-    raw_token = authorization.replace("Bearer ", "", 1).strip()
-    if not raw_token:
         raise HTTPException(status_code=401, detail="Missing session token")
 
-    token_hash = hash_session_token(raw_token)
+    prefix = "Bearer "
+    if not authorization.startswith(prefix):
+        raise HTTPException(status_code=401, detail="Missing session token")
+
+    session_token = authorization[len(prefix):].strip()
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Missing session token")
+
+    session_token_hash = hash_session_token(session_token)
+
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is missing")
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -925,37 +926,48 @@ def get_current_user_from_auth(authorization: str | None):
                     u.full_name,
                     u.email,
                     u.role,
-                    u.status,
                     u.tenant_id,
-                    t.name
-                FROM active_sessions s
+                    t.name,
+                    COALESCE(u.plan_code, 'starter'),
+                    COALESCE(u.credits_balance, 0),
+                    COALESCE(u.monthly_search_count, 0),
+                    COALESCE(u.monthly_search_limit, 0),
+                    u.credits_reset_at,
+                    COALESCE(u.billing_status, 'active'),
+                    COALESCE(u.is_superadmin, false),
+                    COALESCE(sp.features, '{}'::jsonb)
+                FROM user_sessions s
                 JOIN users u ON u.id = s.user_id
-                JOIN tenants t ON t.id = u.tenant_id
+                LEFT JOIN tenants t ON t.id = u.tenant_id
+                LEFT JOIN subscription_plans sp ON sp.code = COALESCE(u.plan_code, 'starter')
                 WHERE s.session_token_hash = %s
-                  AND s.is_revoked = FALSE
+                  AND s.expires_at > NOW()
+                ORDER BY s.created_at DESC
                 LIMIT 1
                 """,
-                (token_hash,),
+                (session_token_hash,),
             )
             row = cur.fetchone()
 
-            if not row:
-                raise HTTPException(status_code=401, detail="Session is invalid or expired")
+    if not row:
+        raise HTTPException(status_code=401, detail="Session is invalid or expired")
 
-            user_id, full_name, email, role, status, tenant_id, tenant_name = row
-
-            if status != "active":
-                raise HTTPException(status_code=403, detail="User is not active")
-
-            cur.execute(
-                """
-                UPDATE active_sessions
-                SET last_seen_at = NOW()
-                WHERE session_token_hash = %s
-                """,
-                (token_hash,),
-            )
-        conn.commit()
+    (
+        user_id,
+        full_name,
+        email,
+        role,
+        tenant_id,
+        tenant_name,
+        plan_code,
+        credits_balance,
+        monthly_search_count,
+        monthly_search_limit,
+        credits_reset_at,
+        billing_status,
+        is_superadmin,
+        plan_features,
+    ) = row
 
     return {
         "id": str(user_id),
@@ -964,278 +976,16 @@ def get_current_user_from_auth(authorization: str | None):
         "role": role,
         "tenant_id": str(tenant_id),
         "tenant": tenant_name,
+        "plan_code": plan_code,
+        "plan_name": str(plan_code).title() if plan_code else "Starter",
+        "credits_balance": credits_balance,
+        "monthly_search_count": monthly_search_count,
+        "monthly_search_limit": monthly_search_limit,
+        "credits_reset_at": credits_reset_at.isoformat() if credits_reset_at else None,
+        "billing_status": billing_status,
+        "is_superadmin": bool(is_superadmin),
+        "plan_features": plan_features or {},
     }
-
-
-def detect_column_type(column_name: str) -> str:
-    name = clean_text(column_name).lower()
-
-    if not name:
-        return "unknown"
-
-    if "p-number" in name or "p number" in name:
-        return "plot_number"
-
-    if "owner" in name and "arabic" in name:
-        return "owner_name_ar"
-    if "owner" in name and "name" in name:
-        return "owner_name"
-    if name in {"owner", "owner name"}:
-        return "owner_name"
-
-    if ("office" in name or "company" in name or "agency" in name or "brokerage" in name) and "arabic" in name:
-        return "company_name_ar"
-    if "office" in name or "company" in name or "agency" in name or "brokerage" in name:
-        return "company_name"
-
-    if "email" in name:
-        return "email"
-
-    if "phone" in name or "mobile" in name or "tel" in name or "contact number" in name:
-        return "phone"
-
-    if "district" in name or name == "area":
-        return "district"
-
-    if "master community" in name:
-        return "master_community"
-
-    if "sub community" in name:
-        return "sub_community"
-
-    if "community" in name:
-        return "master_community"
-
-    if "project" in name or "cluster" in name:
-        return "project_name"
-
-    if "property type" in name or "unit type" in name:
-        return "property_type"
-
-    if "bedroom" in name or name == "b/r" or name == "br":
-        return "bedroom_count"
-
-    if "unit number" in name or "unit no" in name or "apartment number" in name or "villa number" in name:
-        return "unit_number"
-
-    if "building name" in name or name == "tower" or name == "building":
-        return "building_name"
-
-    if "plot number" in name or "plot no" in name:
-        return "plot_number"
-
-    if "developer" in name:
-        return "developer_name"
-
-    if "name arabic" in name:
-        return "owner_name_ar"
-
-    if "name english" in name or name == "name":
-        return "owner_name"
-
-    return "unknown"
-
-
-def build_column_map(df: pd.DataFrame) -> dict[str, str]:
-    return {col: detect_column_type(col) for col in df.columns}
-
-
-def find_first_value(row: dict, column_map: dict, target_type: str) -> str:
-    for col, mapped in column_map.items():
-        if mapped == target_type:
-            value = clean_text(row.get(col, ""))
-            if value:
-                return value
-    return ""
-
-
-def first_non_empty(row_dict: dict, keys: list[str]) -> str:
-    for key in keys:
-        value = row_dict.get(key)
-        value = clean_text(value)
-        if value:
-            return value
-    return ""
-
-
-def normalize_p_number(value) -> str:
-    return clean_text(value).upper()
-
-
-def build_type_a_owner_map(sheet1: pd.DataFrame) -> dict:
-    owner_map = {}
-
-    if sheet1.empty:
-        return owner_map
-
-    first_col = sheet1.columns[0]
-
-    for _, row in sheet1.iterrows():
-        p_number = normalize_p_number(row.get(first_col))
-        if p_number:
-            owner_map[p_number] = row.to_dict()
-
-    return owner_map
-
-
-def normalize_record(row: dict, column_map: dict, sheet_name: str) -> dict:
-    owner_name = find_first_value(row, column_map, "owner_name")
-    owner_name_ar = find_first_value(row, column_map, "owner_name_ar")
-    email = find_first_value(row, column_map, "email")
-    phone = find_first_value(row, column_map, "phone")
-    district = find_first_value(row, column_map, "district")
-    master_community = find_first_value(row, column_map, "master_community")
-    project_name = find_first_value(row, column_map, "project_name")
-    sub_community = find_first_value(row, column_map, "sub_community")
-    property_type = find_first_value(row, column_map, "property_type")
-    bedroom_count = find_first_value(row, column_map, "bedroom_count")
-    unit_number = find_first_value(row, column_map, "unit_number")
-    building_name = find_first_value(row, column_map, "building_name")
-    plot_number = find_first_value(row, column_map, "plot_number")
-    developer_name = find_first_value(row, column_map, "developer_name")
-
-    if not owner_name:
-        owner_name = first_non_empty(
-            row,
-            ["Name English", "Owner Name", "OWNER NAME", "Name", "Customer Name", "Client Name"],
-        )
-
-    if not owner_name_ar:
-        owner_name_ar = first_non_empty(
-            row,
-            ["Name Arabic", "Owner Name Arabic", "OWNER NAME ARABIC"],
-        )
-
-    if not email:
-        email = first_non_empty(row, ["Email", "EMAIL", "E-mail"])
-
-    if not phone:
-        phone = first_non_empty(row, ["Phone", "PHONE", "Phone Number", "Mobile", "Mobile Number", "Tel"])
-
-    if not district:
-        district = first_non_empty(row, ["District", "DISTRICT", "Area"])
-
-    if not master_community:
-        master_community = first_non_empty(row, ["Master Community", "MASTER COMMUNITY", "Community"])
-
-    if not project_name:
-        project_name = first_non_empty(row, ["Project", "PROJECT", "Project Name", "Building", "Cluster"])
-
-    if not sub_community:
-        sub_community = first_non_empty(row, ["Sub Community", "SUB COMMUNITY", "Cluster", "Phase"])
-
-    if not property_type:
-        property_type = first_non_empty(row, ["Property Type", "PROPERTY TYPE", "Type", "Unit Type"])
-
-    if not bedroom_count:
-        bedroom_count = first_non_empty(row, ["Bedrooms", "BEDROOMS", "Bedroom", "B/R"])
-
-    if not unit_number:
-        unit_number = first_non_empty(
-            row,
-            ["Unit Number", "UNIT NUMBER", "Unit No", "Apartment Number", "Villa Number"],
-        )
-
-    if not building_name:
-        building_name = first_non_empty(row, ["Building Name", "BUILDING NAME", "Tower", "Building"])
-
-    if not plot_number:
-        plot_number = first_non_empty(row, ["Plot Number", "PLOT NUMBER", "Plot No", "P-NUMBER"])
-
-    if not developer_name:
-        developer_name = first_non_empty(row, ["Developer", "Developer Name", "DEVELOPER"])
-
-    if not bedroom_count:
-        for value in row.values():
-            guessed = guess_bedroom_count(value)
-            if guessed:
-                bedroom_count = guessed
-                break
-
-    return {
-        "owner_name": owner_name,
-        "owner_name_ar": owner_name_ar,
-        "email": email,
-        "phone": normalize_phone(phone),
-        "district": district,
-        "master_community": master_community,
-        "project_name": project_name,
-        "sub_community": sub_community,
-        "property_type": property_type,
-        "bedroom_count": bedroom_count,
-        "unit_number": unit_number,
-        "building_name": building_name,
-        "plot_number": plot_number,
-        "developer_name": developer_name,
-        "source_sheet": sheet_name,
-        "raw_data": row,
-    }
-
-
-def profile_dataframe(df: pd.DataFrame, sheet_name: str) -> dict:
-    df = clean_dataframe(df)
-    column_map = build_column_map(df)
-    preview = df.head(5).to_dict(orient="records")
-
-    return {
-        "sheet_name": sheet_name,
-        "row_count": int(df.shape[0]),
-        "column_count": int(df.shape[1]),
-        "columns": list(df.columns),
-        "column_types": column_map,
-        "preview": preview,
-    }
-
-
-def parse_uploaded_file(file: UploadFile, file_bytes: bytes) -> tuple[str, str, list[dict]]:
-    filename = clean_text(file.filename).lower()
-
-    try:
-        if filename.endswith(".csv"):
-            df = pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
-            df = clean_dataframe(df)
-            return "type_b", "csv", [
-                {
-                    "sheet_name": "Sheet1",
-                    "sheet_index": 0,
-                    "dataframe": df,
-                }
-            ]
-
-        if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            excel_file = pd.ExcelFile(BytesIO(file_bytes))
-            sheet_names = excel_file.sheet_names
-            sheets = []
-
-            for sheet_index, sheet_name in enumerate(sheet_names):
-                df = excel_file.parse(sheet_name, dtype=str).fillna("")
-                df = clean_dataframe(df)
-                sheets.append(
-                    {
-                        "sheet_name": sheet_name,
-                        "sheet_index": sheet_index,
-                        "dataframe": df,
-                    }
-                )
-
-            source_type = "type_a" if len(sheet_names) >= 2 else "type_b"
-            return source_type, "excel", sheets
-
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
-
-@app.get("/")
-def root():
-    return {"app": "Tru Property Lookup API", "status": "ok"}
-
-
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
 
 
 @app.post("/login")
@@ -1312,7 +1062,6 @@ def login(payload: LoginRequest):
                 (str(user_id),),
             )
             billing_row = cur.fetchone()
-
             if billing_row:
                 (
                     plan_code,
@@ -1363,6 +1112,29 @@ def login(payload: LoginRequest):
 
 
 @app.get("/me")
+def me(
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+    return {
+        "id": user["id"],
+        "full_name": user["full_name"],
+        "email": user["email"],
+        "role": user["role"],
+        "tenant_id": user["tenant_id"],
+        "tenant": user["tenant"],
+        "plan_code": user.get("plan_code", "starter"),
+        "plan_name": user.get("plan_name", "Starter"),
+        "credits_balance": user.get("credits_balance", 0),
+        "monthly_search_count": user.get("monthly_search_count", 0),
+        "monthly_search_limit": user.get("monthly_search_limit", 0),
+        "credits_reset_at": user.get("credits_reset_at"),
+        "billing_status": user.get("billing_status", "active"),
+        "is_superadmin": user.get("is_superadmin", False),
+        "plan_features": user.get("plan_features", {}),
+    }
+
+
 def me(authorization: str | None = Header(default=None)):
     user = get_current_user_from_auth(authorization)
     return {"message": "Session valid", "user": user}
