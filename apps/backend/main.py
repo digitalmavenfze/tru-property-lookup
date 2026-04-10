@@ -2,11 +2,13 @@
 import os
 import re
 import json
+from datetime import datetime, timezone, timedelta
 import secrets
 import hashlib
 from typing import Any
 from io import BytesIO
 
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Query
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
@@ -17,6 +19,20 @@ import pandas as pd
 load_dotenv("/app/.env")
 
 app = FastAPI(title="Tru Property Lookup API")
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://72.61.117.207:3020",
+        "http://127.0.0.1:3020",
+        "http://localhost:3020",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPLOAD_DIR = "/app/uploads"
@@ -95,8 +111,315 @@ def normalize_header_name(header: str | None) -> str:
         return ""
     return re.sub(r"\s+", " ", value).lower()
 
+
+def reset_monthly_usage_if_needed(cur, user_id: str):
+    cur.execute(
+        """
+        SELECT credits_reset_at, plan_code
+        FROM users
+        WHERE id = %s
+        """,
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return
+
+    credits_reset_at, plan_code = row
+    if credits_reset_at and credits_reset_at > datetime.now(timezone.utc):
+        return
+
+    cur.execute(
+        """
+        SELECT monthly_credits, monthly_search_limit
+        FROM subscription_plans
+        WHERE code = %s
+        """,
+        (plan_code or "starter",),
+    )
+    plan = cur.fetchone()
+    monthly_credits = plan[0] if plan else 200
+    monthly_limit = plan[1] if plan else 200
+
+    cur.execute(
+        """
+        UPDATE users
+        SET
+            credits_balance = %s,
+            monthly_search_count = 0,
+            monthly_search_limit = %s,
+            credits_reset_at = NOW() + INTERVAL '30 days'
+        WHERE id = %s
+        """,
+        (monthly_credits, monthly_limit, user_id),
+    )
+
+
+def detect_area_tier_and_cost(cur, text_parts: list[str]):
+    haystack = " ".join([clean_text(x).lower() for x in text_parts if clean_text(x)])
+    if not haystack:
+        return ("standard", 1, "")
+
+    cur.execute(
+        """
+        SELECT area_key, area_tier, credit_cost
+        FROM premium_areas
+        WHERE is_active = true
+        ORDER BY credit_cost DESC, area_key
+        """
+    )
+    for area_key, area_tier, credit_cost in cur.fetchall():
+        if area_key in haystack:
+            return (area_tier or "premium", int(credit_cost or 1), area_key)
+
+    return ("standard", 1, "")
+
+
+def consume_credits_and_log(
+    cur,
+    user: dict,
+    endpoint: str,
+    query_text: str = "",
+    owner_name: str = "",
+    phone: str = "",
+    email: str = "",
+    unit_number: str = "",
+    project_name: str = "",
+    property_type: str = "",
+    result_count: int = 0,
+    metadata: dict | None = None,
+):
+    metadata = metadata or {}
+
+    reset_monthly_usage_if_needed(cur, str(user["id"]))
+
+    area_tier, credits_used, matched_area_key = detect_area_tier_and_cost(
+        cur,
+        [
+            query_text,
+            owner_name,
+            phone,
+            email,
+            unit_number,
+            project_name,
+            property_type,
+            metadata.get("master_community", ""),
+            metadata.get("district", ""),
+            metadata.get("sub_community", ""),
+        ],
+    )
+
+    cur.execute(
+        """
+        SELECT credits_balance, monthly_search_count, monthly_search_limit, billing_status, is_superadmin
+        FROM users
+        WHERE id = %s
+        """,
+        (str(user["id"]),),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    credits_balance, monthly_search_count, monthly_search_limit, billing_status, is_superadmin = row
+
+    if not is_superadmin:
+        if billing_status != "active":
+            raise HTTPException(status_code=402, detail="Billing status is not active")
+        if monthly_search_limit and monthly_search_count >= monthly_search_limit:
+            raise HTTPException(status_code=402, detail="Monthly search limit reached")
+        if credits_balance < credits_used:
+            raise HTTPException(status_code=402, detail="Not enough credits")
+
+        new_balance = credits_balance - credits_used
+
+        cur.execute(
+            """
+            UPDATE users
+            SET
+                credits_balance = %s,
+                monthly_search_count = monthly_search_count + 1
+            WHERE id = %s
+            """,
+            (new_balance, str(user["id"])),
+        )
+
+        cur.execute(
+            """
+            INSERT INTO credit_transactions (
+                tenant_id,
+                user_id,
+                transaction_type,
+                credits,
+                balance_after,
+                reason,
+                metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                str(user["tenant_id"]),
+                str(user["id"]),
+                "debit",
+                credits_used,
+                new_balance,
+                f"{endpoint} search usage",
+                json.dumps({
+                    "endpoint": endpoint,
+                    "query_text": query_text,
+                    "matched_area_key": matched_area_key,
+                    "result_count": result_count,
+                    **metadata,
+                }),
+            ),
+        )
+    else:
+        new_balance = credits_balance
+
+    cur.execute(
+        """
+        INSERT INTO search_usage_logs (
+            tenant_id,
+            user_id,
+            endpoint,
+            query_text,
+            owner_name,
+            phone,
+            email,
+            unit_number,
+            project_name,
+            property_type,
+            credits_used,
+            result_count,
+            area_tier,
+            status,
+            metadata
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+        """,
+        (
+            str(user["tenant_id"]),
+            str(user["id"]),
+            endpoint,
+            query_text,
+            owner_name,
+            phone,
+            email,
+            unit_number,
+            project_name,
+            property_type,
+            credits_used if not is_superadmin else 0,
+            result_count,
+            area_tier,
+            "success",
+            json.dumps({
+                "matched_area_key": matched_area_key,
+                "is_superadmin": bool(is_superadmin),
+                **metadata,
+            }),
+        ),
+    )
+
+    return {
+        "credits_used": 0 if is_superadmin else credits_used,
+        "credits_balance": new_balance,
+        "area_tier": area_tier,
+        "matched_area_key": matched_area_key,
+    }
+
+
+@app.get("/billing/me")
+def billing_me(
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reset_monthly_usage_if_needed(cur, str(user["id"]))
+
+            cur.execute(
+                """
+                SELECT
+                    u.plan_code,
+                    u.credits_balance,
+                    u.monthly_search_count,
+                    u.monthly_search_limit,
+                    u.credits_reset_at,
+                    u.billing_status,
+                    u.is_superadmin,
+                    sp.name,
+                    sp.monthly_credits,
+                    sp.price_usd,
+                    sp.features
+                FROM users u
+                LEFT JOIN subscription_plans sp ON sp.code = u.plan_code
+                WHERE u.id = %s
+                """,
+                (str(user["id"]),),
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Billing profile not found")
+
+    return {
+        "plan_code": row[0],
+        "credits_balance": row[1],
+        "monthly_search_count": row[2],
+        "monthly_search_limit": row[3],
+        "credits_reset_at": row[4].isoformat() if row[4] else None,
+        "billing_status": row[5],
+        "is_superadmin": row[6],
+        "plan_name": row[7],
+        "plan_monthly_credits": row[8],
+        "plan_price_usd": float(row[9]) if row[9] is not None else 0,
+        "features": row[10] or {},
+    }
+
+
+@app.get("/admin/plans")
+def admin_list_plans(
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT is_superadmin FROM users WHERE id = %s", (str(user["id"]),))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                raise HTTPException(status_code=403, detail="Admin access required")
+
+            cur.execute(
+                """
+                SELECT code, name, monthly_credits, monthly_search_limit, price_usd, is_active, features
+                FROM subscription_plans
+                ORDER BY price_usd ASC, name ASC
+                """
+            )
+            plans = cur.fetchall()
+
+    return {
+        "plans": [
+            {
+                "code": code,
+                "name": name,
+                "monthly_credits": monthly_credits,
+                "monthly_search_limit": monthly_search_limit,
+                "price_usd": float(price_usd),
+                "is_active": is_active,
+                "features": features or {},
+            }
+            for code, name, monthly_credits, monthly_search_limit, price_usd, is_active, features in plans
+        ]
+    }
+
+
 def hash_session_token(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
 
 def hash_file_bytes(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
@@ -924,10 +1247,24 @@ def login(payload: LoginRequest):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT u.id, u.full_name, u.email, u.password_hash, u.role, u.status, t.id, t.name
+                SELECT
+                    u.id,
+                    u.full_name,
+                    u.email,
+                    u.password_hash,
+                    u.role,
+                    u.tenant_id,
+                    t.name,
+                    COALESCE(u.plan_code, 'starter'),
+                    COALESCE(u.credits_balance, 0),
+                    COALESCE(u.monthly_search_count, 0),
+                    COALESCE(u.monthly_search_limit, 0),
+                    u.credits_reset_at,
+                    COALESCE(u.billing_status, 'active'),
+                    COALESCE(u.is_superadmin, false)
                 FROM users u
-                JOIN tenants t ON t.id = u.tenant_id
-                WHERE LOWER(u.email) = LOWER(%s)
+                LEFT JOIN tenants t ON t.id = u.tenant_id
+                WHERE lower(u.email) = lower(%s)
                 LIMIT 1
                 """,
                 (payload.email,),
@@ -937,39 +1274,76 @@ def login(payload: LoginRequest):
             if not row:
                 raise HTTPException(status_code=401, detail="Invalid email or password")
 
-            user_id, full_name, email, password_hash, role, status, tenant_id, tenant_name = row
-
-            if status != "active":
-                raise HTTPException(status_code=403, detail="User is not active")
+            (
+                user_id,
+                full_name,
+                email,
+                password_hash,
+                role,
+                tenant_id,
+                tenant_name,
+                plan_code,
+                credits_balance,
+                monthly_search_count,
+                monthly_search_limit,
+                credits_reset_at,
+                billing_status,
+                is_superadmin,
+            ) = row
 
             if not pwd_context.verify(payload.password, password_hash):
                 raise HTTPException(status_code=401, detail="Invalid email or password")
 
+            reset_monthly_usage_if_needed(cur, str(user_id))
+
             cur.execute(
                 """
-                UPDATE active_sessions
-                SET is_revoked = TRUE, revoked_at = NOW()
-                WHERE user_id = %s AND is_revoked = FALSE
+                SELECT
+                    COALESCE(plan_code, 'starter'),
+                    COALESCE(credits_balance, 0),
+                    COALESCE(monthly_search_count, 0),
+                    COALESCE(monthly_search_limit, 0),
+                    credits_reset_at,
+                    COALESCE(billing_status, 'active'),
+                    COALESCE(is_superadmin, false)
+                FROM users
+                WHERE id = %s
                 """,
-                (user_id,),
+                (str(user_id),),
             )
+            billing_row = cur.fetchone()
 
-            raw_token = secrets.token_urlsafe(32)
-            token_hash = hash_session_token(raw_token)
+            if billing_row:
+                (
+                    plan_code,
+                    credits_balance,
+                    monthly_search_count,
+                    monthly_search_limit,
+                    credits_reset_at,
+                    billing_status,
+                    is_superadmin,
+                ) = billing_row
+
+            session_token = secrets.token_urlsafe(32)
+            session_token_hash = hash_session_token(session_token)
 
             cur.execute(
                 """
-                INSERT INTO active_sessions (user_id, session_token_hash, is_revoked)
-                VALUES (%s, %s, FALSE)
+                INSERT INTO user_sessions (
+                    user_id,
+                    session_token_hash,
+                    expires_at
+                )
+                VALUES (%s, %s, NOW() + INTERVAL '30 days')
                 """,
-                (user_id, token_hash),
+                (str(user_id), session_token_hash),
             )
 
         conn.commit()
 
     return {
         "message": "Login successful",
-        "session_token": raw_token,
+        "session_token": session_token,
         "user": {
             "id": str(user_id),
             "full_name": full_name,
@@ -977,6 +1351,13 @@ def login(payload: LoginRequest):
             "role": role,
             "tenant_id": str(tenant_id),
             "tenant": tenant_name,
+            "plan_code": plan_code,
+            "credits_balance": credits_balance,
+            "monthly_search_count": monthly_search_count,
+            "monthly_search_limit": monthly_search_limit,
+            "credits_reset_at": credits_reset_at.isoformat() if credits_reset_at else None,
+            "billing_status": billing_status,
+            "is_superadmin": bool(is_superadmin),
         },
     }
 
@@ -2561,11 +2942,51 @@ def search_properties(
             }
         )
 
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            billing_meta = consume_credits_and_log(
+                cur,
+                user=user,
+                endpoint="/search",
+                query_text=" ".join([
+                    clean_text(owner_name),
+                    clean_text(email),
+                    clean_text(phone),
+                    clean_text(district),
+                    clean_text(master_community),
+                    clean_text(project_name),
+                    clean_text(sub_community),
+                    clean_text(bedroom_count),
+                    clean_text(unit_number),
+                    clean_text(property_type),
+                ]).strip(),
+                owner_name=owner_name,
+                phone=phone,
+                email=email,
+                unit_number=unit_number,
+                project_name=project_name,
+                property_type=property_type,
+                result_count=len(results),
+                metadata={
+                    "district": district,
+                    "master_community": master_community,
+                    "sub_community": sub_community,
+                    "limit": limit,
+                    "offset": offset,
+                    "total_count": total_count,
+                },
+            )
+        conn.commit()
+
     return {
         "count": len(results),
         "total": total_count,
         "limit": limit,
         "offset": offset,
+        "credits_used": billing_meta["credits_used"],
+        "credits_balance": billing_meta["credits_balance"],
+        "area_tier": billing_meta["area_tier"],
+        "matched_area_key": billing_meta["matched_area_key"],
         "results": results,
     }
 
