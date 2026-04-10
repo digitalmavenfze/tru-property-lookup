@@ -379,6 +379,67 @@ def billing_me(
     }
 
 
+
+
+@app.get("/billing/usage")
+def billing_usage(
+    limit: int = Query(default=20, ge=1, le=200),
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    endpoint,
+                    query_text,
+                    owner_name,
+                    phone,
+                    email,
+                    unit_number,
+                    project_name,
+                    property_type,
+                    credits_used,
+                    result_count,
+                    area_tier,
+                    status,
+                    metadata,
+                    created_at
+                FROM search_usage_logs
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (str(user["id"]), limit),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "results": [
+            {
+                "id": str(r[0]),
+                "endpoint": r[1],
+                "query_text": r[2] or "",
+                "owner_name": r[3] or "",
+                "phone": r[4] or "",
+                "email": r[5] or "",
+                "unit_number": r[6] or "",
+                "project_name": r[7] or "",
+                "property_type": r[8] or "",
+                "credits_used": int(r[9] or 0),
+                "result_count": int(r[10] or 0),
+                "area_tier": r[11] or "standard",
+                "status": r[12] or "",
+                "metadata": r[13] or {},
+                "created_at": r[14].isoformat() if r[14] else None,
+            }
+            for r in rows
+        ]
+    }
+
 @app.get("/admin/plans")
 def admin_list_plans(
     authorization: str | None = Header(default=None),
