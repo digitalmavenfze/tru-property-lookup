@@ -2554,10 +2554,7 @@ def parse_nl_search_query(q: str) -> dict:
 
     return filters
 
-
-
 @app.get("/search-ai")
-
 def search_ai(
     q: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
@@ -2653,7 +2650,7 @@ def search_ai(
                 unit_number=filters["unit_number"],
                 project_name=filters["project_name"],
                 property_type=filters["property_type"],
-                result_count=len(results_response.get("results") or []),
+                result_count=len(results_response.get("results", [])),
 
                 metadata={
                     "district": filters["district"],
@@ -2675,7 +2672,7 @@ def search_ai(
     results_response["billing_source"] = "/search-ai"
     return results_response
 
-app.get("/search")
+@app.get("/search")
 def search_properties(
     authorization: str | None = Header(default=None),
     owner_name: str = Query(default=""),
@@ -3076,29 +3073,3 @@ def get_owner_detail(
     }
 
 app.get("/search-ai")
-def search_ai(
-    authorization: str | None = Header(default=None),
-    q: str = Query(default=""),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-):
-    parsed = parse_ai_search_query(q)
-    parsed["limit"] = limit
-    parsed["offset"] = offset
-
-    return search_properties(
-        authorization=authorization,
-        owner_name=parsed.get("owner_name", ""),
-        email=parsed.get("email", ""),
-        phone=parsed.get("phone", ""),
-        district=parsed.get("district", ""),
-        master_community=parsed.get("master_community", ""),
-        project_name=parsed.get("project_name", ""),
-        sub_community=parsed.get("sub_community", ""),
-        bedroom_count=parsed.get("bedroom_count", ""),
-        unit_number=parsed.get("unit_number", ""),
-        property_type=parsed.get("property_type", ""),
-        limit=parsed.get("limit", 50),
-        offset=parsed.get("offset", 0),
-    )
-
