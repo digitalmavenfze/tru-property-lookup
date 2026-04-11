@@ -575,6 +575,62 @@ def admin_update_user_plan(
     }
 
 
+
+@app.post("/admin/users/{target_user_id}/credits")
+def admin_update_user_credits(
+    target_user_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+):
+    admin_user = get_current_user_from_auth(authorization)
+    if not admin_user.get("is_superadmin"):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+
+    amount = int((payload or {}).get("amount", 0))
+    mode = clean_text((payload or {}).get("mode", "add")).lower()
+
+    if mode not in {"add", "deduct"}:
+        raise HTTPException(status_code=400, detail="Invalid mode")
+
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be > 0")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT credits_balance FROM users WHERE id = %s",
+                (target_user_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            current = int(row[0] or 0)
+
+            if mode == "add":
+                new_balance = current + amount
+            else:
+                new_balance = max(0, current - amount)
+
+            cur.execute(
+                """
+                UPDATE users
+                SET credits_balance = %s
+                WHERE id = %s
+                RETURNING id, credits_balance
+                """,
+                (new_balance, target_user_id),
+            )
+            updated = cur.fetchone()
+            conn.commit()
+
+    return {
+        "message": "Credits updated",
+        "user_id": str(updated[0]),
+        "credits_balance": int(updated[1]),
+    }
+
+
 @app.post("/admin/users/{target_user_id}/credits")
 def admin_set_user_credits(
     target_user_id: str,
