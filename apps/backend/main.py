@@ -440,6 +440,281 @@ def billing_usage(
         ]
     }
 
+
+
+@app.get("/admin/users")
+def admin_list_users(
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_auth(authorization)
+    if not user.get("is_superadmin"):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    full_name,
+                    email,
+                    role,
+                    tenant_id,
+                    plan_code,
+                    credits_balance,
+                    monthly_search_count,
+                    monthly_search_limit,
+                    credits_reset_at,
+                    billing_status,
+                    is_superadmin,
+                    created_at
+                FROM users
+                ORDER BY created_at DESC NULLS LAST, email ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    results = []
+    for r in rows:
+        results.append({
+            "id": str(r[0]),
+            "full_name": r[1] or "",
+            "email": r[2] or "",
+            "role": r[3] or "",
+            "tenant_id": str(r[4]) if r[4] else "",
+            "plan_code": r[5] or "",
+            "credits_balance": int(r[6] or 0),
+            "monthly_search_count": int(r[7] or 0),
+            "monthly_search_limit": int(r[8] or 0),
+            "credits_reset_at": r[9].isoformat() if r[9] else None,
+            "billing_status": r[10] or "",
+            "is_superadmin": bool(r[11]),
+            "created_at": r[12].isoformat() if r[12] else None,
+        })
+
+    return {"results": results}
+
+
+@app.post("/admin/users/{target_user_id}/plan")
+def admin_update_user_plan(
+    target_user_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+):
+    admin_user = get_current_user_from_auth(authorization)
+    if not admin_user.get("is_superadmin"):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+
+    plan_code = clean_text((payload or {}).get("plan_code", "")).lower()
+    billing_status = clean_text((payload or {}).get("billing_status", "active")).lower()
+
+    if plan_code not in PLANS:
+        raise HTTPException(status_code=400, detail="Invalid plan_code")
+
+    if billing_status not in {"active", "paused", "cancelled", "past_due"}:
+        raise HTTPException(status_code=400, detail="Invalid billing_status")
+
+    plan = PLANS.get(plan_code, {})
+    monthly_credits = int(plan.get("monthly_credits", 0))
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET
+                    plan_code = %s,
+                    monthly_search_limit = %s,
+                    billing_status = %s
+                WHERE id = %s::uuid
+                RETURNING
+                    id,
+                    full_name,
+                    email,
+                    plan_code,
+                    credits_balance,
+                    monthly_search_count,
+                    monthly_search_limit,
+                    credits_reset_at,
+                    billing_status,
+                    is_superadmin
+                """,
+                (plan_code, monthly_credits, billing_status, target_user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+        conn.commit()
+
+    return {
+        "message": "Plan updated",
+        "user": {
+            "id": str(row[0]),
+            "full_name": row[1] or "",
+            "email": row[2] or "",
+            "plan_code": row[3] or "",
+            "credits_balance": int(row[4] or 0),
+            "monthly_search_count": int(row[5] or 0),
+            "monthly_search_limit": int(row[6] or 0),
+            "credits_reset_at": row[7].isoformat() if row[7] else None,
+            "billing_status": row[8] or "",
+            "is_superadmin": bool(row[9]),
+        },
+    }
+
+
+@app.post("/admin/users/{target_user_id}/credits")
+def admin_set_user_credits(
+    target_user_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+):
+    admin_user = get_current_user_from_auth(authorization)
+    if not admin_user.get("is_superadmin"):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+
+    credits_balance = int((payload or {}).get("credits_balance", 0))
+    monthly_search_count = int((payload or {}).get("monthly_search_count", 0))
+    monthly_search_limit = int((payload or {}).get("monthly_search_limit", 0))
+    reason = clean_text((payload or {}).get("reason", "admin credit adjustment")) or "admin credit adjustment"
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET
+                    credits_balance = %s,
+                    monthly_search_count = %s,
+                    monthly_search_limit = %s
+                WHERE id = %s::uuid
+                RETURNING id, email, credits_balance, monthly_search_count, monthly_search_limit
+                """,
+                (credits_balance, monthly_search_count, monthly_search_limit, target_user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            cur.execute(
+                """
+                INSERT INTO credit_transactions (
+                    user_id,
+                    transaction_type,
+                    credits,
+                    balance_after,
+                    reason
+                )
+                VALUES (%s::uuid, %s, %s, %s, %s)
+                """,
+                (
+                    target_user_id,
+                    "adjustment",
+                    0,
+                    credits_balance,
+                    reason,
+                ),
+            )
+        conn.commit()
+
+    return {
+        "message": "Credits updated",
+        "user_id": str(row[0]),
+        "email": row[1],
+        "credits_balance": int(row[2] or 0),
+        "monthly_search_count": int(row[3] or 0),
+        "monthly_search_limit": int(row[4] or 0),
+    }
+
+
+@app.post("/admin/users/{target_user_id}/reset-usage")
+def admin_reset_user_usage(
+    target_user_id: str,
+    authorization: str | None = Header(default=None),
+):
+    admin_user = get_current_user_from_auth(authorization)
+    if not admin_user.get("is_superadmin"):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT plan_code
+                FROM users
+                WHERE id = %s::uuid
+                """,
+                (target_user_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            plan_code = row[0] or ""
+            plan = PLANS.get(plan_code, {})
+            monthly_credits = int(plan.get("monthly_credits", 0))
+
+            cur.execute(
+                """
+                UPDATE users
+                SET
+                    credits_balance = %s,
+                    monthly_search_count = 0,
+                    monthly_search_limit = %s,
+                    credits_reset_at = NOW() + INTERVAL '30 days'
+                WHERE id = %s::uuid
+                RETURNING id, credits_balance, monthly_search_count, monthly_search_limit, credits_reset_at
+                """,
+                (monthly_credits, monthly_credits, target_user_id),
+            )
+            updated = cur.fetchone()
+        conn.commit()
+
+    return {
+        "message": "Usage reset",
+        "user_id": str(updated[0]),
+        "credits_balance": int(updated[1] or 0),
+        "monthly_search_count": int(updated[2] or 0),
+        "monthly_search_limit": int(updated[3] or 0),
+        "credits_reset_at": updated[4].isoformat() if updated[4] else None,
+    }
+
+
+@app.post("/admin/users/{target_user_id}/superadmin")
+def admin_set_superadmin(
+    target_user_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+):
+    admin_user = get_current_user_from_auth(authorization)
+    if not admin_user.get("is_superadmin"):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+
+    is_superadmin = bool((payload or {}).get("is_superadmin", False))
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET is_superadmin = %s
+                WHERE id = %s::uuid
+                RETURNING id, email, is_superadmin
+                """,
+                (is_superadmin, target_user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+        conn.commit()
+
+    return {
+        "message": "Superadmin updated",
+        "user_id": str(row[0]),
+        "email": row[1] or "",
+        "is_superadmin": bool(row[2]),
+    }
+
 @app.get("/admin/plans")
 def admin_list_plans(
     authorization: str | None = Header(default=None),
