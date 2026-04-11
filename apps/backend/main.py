@@ -560,7 +560,7 @@ def admin_update_user_plan(
     if billing_status not in {"active", "paused", "cancelled", "past_due"}:
         raise HTTPException(status_code=400, detail="Invalid billing_status")
 
-    plan = BILLING_BILLING_BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
+    plan = BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
     monthly_credits = int(plan.get("monthly_credits", 0))
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -743,7 +743,7 @@ def admin_reset_user_usage(
                 raise HTTPException(status_code=404, detail="User not found")
 
             plan_code = row[0] or ""
-            plan = BILLING_BILLING_BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
+            plan = BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
             monthly_credits = int(plan.get("monthly_credits", 0))
 
             cur.execute(
