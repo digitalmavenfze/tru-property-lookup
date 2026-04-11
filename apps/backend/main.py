@@ -35,6 +35,13 @@ app.add_middleware(
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+ADMIN_PLAN_CONFIG = {
+    "starter": {"monthly_credits": 200, "price_usd": 49.0, "features": {"export": False, "ai_search": True, "owner_detail": True}},
+    "pro": {"monthly_credits": 5000, "price_usd": 199.0, "features": {"export": True, "ai_search": True, "owner_detail": True}},
+    "enterprise": {"monthly_credits": 25000, "price_usd": 999.0, "features": {"export": True, "ai_search": True, "owner_detail": True}},
+}
 UPLOAD_DIR = "/app/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -513,13 +520,13 @@ def admin_update_user_plan(
     plan_code = clean_text((payload or {}).get("plan_code", "")).lower()
     billing_status = clean_text((payload or {}).get("billing_status", "active")).lower()
 
-    if plan_code not in PLANS:
+    if plan_code not in ADMIN_PLAN_CONFIG:
         raise HTTPException(status_code=400, detail="Invalid plan_code")
 
     if billing_status not in {"active", "paused", "cancelled", "past_due"}:
         raise HTTPException(status_code=400, detail="Invalid billing_status")
 
-    plan = PLANS.get(plan_code, {})
+    plan = ADMIN_PLAN_CONFIG.get(plan_code, {})
     monthly_credits = int(plan.get("monthly_credits", 0))
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -646,7 +653,7 @@ def admin_reset_user_usage(
                 raise HTTPException(status_code=404, detail="User not found")
 
             plan_code = row[0] or ""
-            plan = PLANS.get(plan_code, {})
+            plan = ADMIN_PLAN_CONFIG.get(plan_code, {})
             monthly_credits = int(plan.get("monthly_credits", 0))
 
             cur.execute(
