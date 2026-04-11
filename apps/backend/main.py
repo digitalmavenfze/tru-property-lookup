@@ -495,6 +495,11 @@ def admin_list_users(
     return {"results": results}
 
 
+
+
+
+
+
 @app.post("/admin/users/{target_user_id}/plan")
 def admin_update_user_plan(
     target_user_id: str,
@@ -607,13 +612,7 @@ def admin_set_user_credits(
                 )
                 VALUES (%s::uuid, %s, %s, %s, %s)
                 """,
-                (
-                    target_user_id,
-                    "adjustment",
-                    0,
-                    credits_balance,
-                    reason,
-                ),
+                (target_user_id, "adjustment", 0, credits_balance, reason),
             )
         conn.commit()
 
@@ -639,11 +638,7 @@ def admin_reset_user_usage(
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT plan_code
-                FROM users
-                WHERE id = %s::uuid
-                """,
+                "SELECT plan_code FROM users WHERE id = %s::uuid",
                 (target_user_id,),
             )
             row = cur.fetchone()
@@ -714,6 +709,7 @@ def admin_set_superadmin(
         "email": row[1] or "",
         "is_superadmin": bool(row[2]),
     }
+
 
 @app.get("/admin/plans")
 def admin_list_plans(
