@@ -36,6 +36,7 @@ app.add_middleware(
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 BILLING_PLANS = {
     "starter": {
         "name": "Starter",
@@ -60,7 +61,7 @@ BILLING_PLANS = {
     "enterprise": {
         "name": "Enterprise",
         "monthly_credits": 25000,
-        "price_usd": 999.0,
+        "price_usd": 299.0,
         "features": {
             "export": True,
             "ai_search": True,
@@ -72,9 +73,36 @@ BILLING_PLANS = {
 
 
 BILLING_PLANS = {
-    "starter": {"monthly_credits": 200, "price_usd": 49.0, "features": {"export": False, "ai_search": True, "owner_detail": True}},
-    "pro": {"monthly_credits": 5000, "price_usd": 199.0, "features": {"export": True, "ai_search": True, "owner_detail": True}},
-    "enterprise": {"monthly_credits": 25000, "price_usd": 999.0, "features": {"export": True, "ai_search": True, "owner_detail": True}},
+    "starter": {
+        "name": "Starter",
+        "monthly_credits": 200,
+        "price_usd": 49.0,
+        "features": {
+            "export": False,
+            "ai_search": True,
+            "owner_detail": True,
+        },
+    },
+    "pro": {
+        "name": "Pro",
+        "monthly_credits": 5000,
+        "price_usd": 199.0,
+        "features": {
+            "export": True,
+            "ai_search": True,
+            "owner_detail": True,
+        },
+    },
+    "enterprise": {
+        "name": "Enterprise",
+        "monthly_credits": 25000,
+        "price_usd": 299.0,
+        "features": {
+            "export": True,
+            "ai_search": True,
+            "owner_detail": True,
+        },
+    },
 }
 UPLOAD_DIR = "/app/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -375,52 +403,23 @@ def billing_me(
 ):
     user = get_current_user_from_auth(authorization)
 
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            reset_monthly_usage_if_needed(cur, str(user["id"]))
-
-            cur.execute(
-                """
-                SELECT
-                    u.plan_code,
-                    u.credits_balance,
-                    u.monthly_search_count,
-                    u.monthly_search_limit,
-                    u.credits_reset_at,
-                    u.billing_status,
-                    u.is_superadmin,
-                    sp.name,
-                    sp.monthly_credits,
-                    sp.price_usd,
-                    sp.features
-                FROM users u
-                LEFT JOIN subscription_plans sp ON sp.code = u.plan_code
-                WHERE u.id = %s
-                """,
-                (str(user["id"]),),
-            )
-            row = cur.fetchone()
-            conn.commit()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Billing profile not found")
+    plan_code = (user.get("plan_code") or "starter").lower()
+    plan = BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
 
     return {
-        "plan_code": row[0],
-        "credits_balance": row[1],
-        "monthly_search_count": row[2],
-        "monthly_search_limit": row[3],
-        "credits_reset_at": row[4].isoformat() if row[4] else None,
-        "billing_status": row[5],
-        "is_superadmin": row[6],
-        "plan_name": row[7],
-        "plan_monthly_credits": row[8],
-        "plan_price_usd": float(row[9]) if row[9] is not None else 0,
-        "features": row[10] or {},
+        "plan_code": plan_code,
+        "credits_balance": int(user.get("credits_balance", 0) or 0),
+        "monthly_search_count": int(user.get("monthly_search_count", 0) or 0),
+        "monthly_search_limit": int(user.get("monthly_search_limit", plan.get("monthly_credits", 0)) or 0),
+        "credits_reset_at": user.get("credits_reset_at"),
+        "billing_status": user.get("billing_status", "active"),
+        "is_superadmin": bool(user.get("is_superadmin", False)),
+        "plan_name": plan.get("name"),
+        "plan_monthly_credits": int(plan.get("monthly_credits", 0)),
+        "plan_price_usd": float(plan.get("price_usd", 0)),
+        "features": plan.get("features", {}),
     }
-
-
-
+}
 
 @app.get("/billing/usage")
 def billing_usage(
@@ -560,7 +559,7 @@ def admin_update_user_plan(
     if billing_status not in {"active", "paused", "cancelled", "past_due"}:
         raise HTTPException(status_code=400, detail="Invalid billing_status")
 
-    plan = BILLING_BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
+    plan = BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
     monthly_credits = int(plan.get("monthly_credits", 0))
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -743,7 +742,7 @@ def admin_reset_user_usage(
                 raise HTTPException(status_code=404, detail="User not found")
 
             plan_code = row[0] or ""
-            plan = BILLING_BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
+            plan = BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
             monthly_credits = int(plan.get("monthly_credits", 0))
 
             cur.execute(
