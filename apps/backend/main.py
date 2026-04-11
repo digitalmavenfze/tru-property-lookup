@@ -36,8 +36,42 @@ app.add_middleware(
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+BILLING_PLANS = {
+    "starter": {
+        "name": "Starter",
+        "monthly_credits": 200,
+        "price_usd": 49.0,
+        "features": {
+            "export": False,
+            "ai_search": True,
+            "owner_detail": True,
+        },
+    },
+    "pro": {
+        "name": "Pro",
+        "monthly_credits": 5000,
+        "price_usd": 199.0,
+        "features": {
+            "export": True,
+            "ai_search": True,
+            "owner_detail": True,
+        },
+    },
+    "enterprise": {
+        "name": "Enterprise",
+        "monthly_credits": 25000,
+        "price_usd": 999.0,
+        "features": {
+            "export": True,
+            "ai_search": True,
+            "owner_detail": True,
+        },
+    },
+}
 
-ADMIN_PLAN_CONFIG = {
+
+
+BILLING_PLANS = {
     "starter": {"monthly_credits": 200, "price_usd": 49.0, "features": {"export": False, "ai_search": True, "owner_detail": True}},
     "pro": {"monthly_credits": 5000, "price_usd": 199.0, "features": {"export": True, "ai_search": True, "owner_detail": True}},
     "enterprise": {"monthly_credits": 25000, "price_usd": 999.0, "features": {"export": True, "ai_search": True, "owner_detail": True}},
@@ -520,13 +554,13 @@ def admin_update_user_plan(
     plan_code = clean_text((payload or {}).get("plan_code", "")).lower()
     billing_status = clean_text((payload or {}).get("billing_status", "active")).lower()
 
-    if plan_code not in ADMIN_PLAN_CONFIG:
+    if plan_code not in BILLING_PLANS:
         raise HTTPException(status_code=400, detail="Invalid plan_code")
 
     if billing_status not in {"active", "paused", "cancelled", "past_due"}:
         raise HTTPException(status_code=400, detail="Invalid billing_status")
 
-    plan = ADMIN_PLAN_CONFIG.get(plan_code, {})
+    plan = BILLING_BILLING_PLANS.get(plan_code, {})
     monthly_credits = int(plan.get("monthly_credits", 0))
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -709,7 +743,7 @@ def admin_reset_user_usage(
                 raise HTTPException(status_code=404, detail="User not found")
 
             plan_code = row[0] or ""
-            plan = ADMIN_PLAN_CONFIG.get(plan_code, {})
+            plan = BILLING_BILLING_PLANS.get(plan_code, {})
             monthly_credits = int(plan.get("monthly_credits", 0))
 
             cur.execute(
