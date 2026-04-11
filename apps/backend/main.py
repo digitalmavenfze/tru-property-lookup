@@ -560,7 +560,7 @@ def admin_update_user_plan(
     if billing_status not in {"active", "paused", "cancelled", "past_due"}:
         raise HTTPException(status_code=400, detail="Invalid billing_status")
 
-    plan = BILLING_BILLING_PLANS.get(plan_code, {})
+    plan = BILLING_BILLING_BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
     monthly_credits = int(plan.get("monthly_credits", 0))
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -610,6 +610,7 @@ def admin_update_user_plan(
 
 
 
+
 @app.post("/admin/users/{target_user_id}/credits")
 def admin_update_user_credits(
     target_user_id: str,
@@ -620,31 +621,31 @@ def admin_update_user_credits(
     if not admin_user.get("is_superadmin"):
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
-    amount = int((payload or {}).get("amount", 0))
-    mode = clean_text((payload or {}).get("mode", "add")).lower()
+    try:
+        amount = int((payload or {}).get("amount", 0))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid amount")
+
+    mode = clean_text((payload or {}).get("mode", "")).lower()
+
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid amount")
 
     if mode not in {"add", "deduct"}:
         raise HTTPException(status_code=400, detail="Invalid mode")
 
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be > 0")
-
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT credits_balance FROM users WHERE id = %s",
-                (target_user_id,)
-            )
+            cur.execute("SELECT credits_balance FROM users WHERE id = %s", (target_user_id,))
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="User not found")
 
-            current = int(row[0] or 0)
-
-            if mode == "add":
-                new_balance = current + amount
+            current_balance = int(row[0] or 0)
+            if mode == "deduct":
+                new_balance = max(0, current_balance - amount)
             else:
-                new_balance = max(0, current - amount)
+                new_balance = current_balance + amount
 
             cur.execute(
                 """
@@ -661,9 +662,8 @@ def admin_update_user_credits(
     return {
         "message": "Credits updated",
         "user_id": str(updated[0]),
-        "credits_balance": int(updated[1]),
+        "credits_balance": int(updated[1] or 0),
     }
-
 
 @app.post("/admin/users/{target_user_id}/credits")
 def admin_set_user_credits(
@@ -743,7 +743,7 @@ def admin_reset_user_usage(
                 raise HTTPException(status_code=404, detail="User not found")
 
             plan_code = row[0] or ""
-            plan = BILLING_BILLING_PLANS.get(plan_code, {})
+            plan = BILLING_BILLING_BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
             monthly_credits = int(plan.get("monthly_credits", 0))
 
             cur.execute(
