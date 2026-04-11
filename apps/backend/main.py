@@ -403,23 +403,52 @@ def billing_me(
 ):
     user = get_current_user_from_auth(authorization)
 
-    plan_code = (user.get("plan_code") or "starter").lower()
-    plan = BILLING_PLANS.get(plan_code, BILLING_PLANS["starter"])
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reset_monthly_usage_if_needed(cur, str(user["id"]))
+
+            cur.execute(
+                """
+                SELECT
+                    u.plan_code,
+                    u.credits_balance,
+                    u.monthly_search_count,
+                    u.monthly_search_limit,
+                    u.credits_reset_at,
+                    u.billing_status,
+                    u.is_superadmin,
+                    sp.name,
+                    sp.monthly_credits,
+                    sp.price_usd,
+                    sp.features
+                FROM users u
+                LEFT JOIN subscription_plans sp ON sp.code = u.plan_code
+                WHERE u.id = %s
+                """,
+                (str(user["id"]),),
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Billing profile not found")
 
     return {
-        "plan_code": plan_code,
-        "credits_balance": int(user.get("credits_balance", 0) or 0),
-        "monthly_search_count": int(user.get("monthly_search_count", 0) or 0),
-        "monthly_search_limit": int(user.get("monthly_search_limit", plan.get("monthly_credits", 0)) or 0),
-        "credits_reset_at": user.get("credits_reset_at"),
-        "billing_status": user.get("billing_status", "active"),
-        "is_superadmin": bool(user.get("is_superadmin", False)),
-        "plan_name": plan.get("name"),
-        "plan_monthly_credits": int(plan.get("monthly_credits", 0)),
-        "plan_price_usd": float(plan.get("price_usd", 0)),
-        "features": plan.get("features", {}),
+        "plan_code": row[0],
+        "credits_balance": row[1],
+        "monthly_search_count": row[2],
+        "monthly_search_limit": row[3],
+        "credits_reset_at": row[4].isoformat() if row[4] else None,
+        "billing_status": row[5],
+        "is_superadmin": row[6],
+        "plan_name": row[7],
+        "plan_monthly_credits": row[8],
+        "plan_price_usd": float(row[9]) if row[9] is not None else 0,
+        "features": row[10] or {},
     }
-}
+
+
+
 
 @app.get("/billing/usage")
 def billing_usage(
